@@ -1,0 +1,126 @@
+#!/bin/bash
+if [ "$DEBUG" == "1" ]; then
+	set -x
+fi
+TMP_DIR=$(mktemp -d -t krayt-installer-XXXXXXXXXX)
+function cleanup {
+	rm -rf $TMP_DIR >/dev/null
+}
+function fail {
+	cleanup
+	msg=$1
+	echo "============"
+	echo "Error: $msg" 1>&2
+	exit 1
+}
+function check_deps {
+	if ! command -v uv &>/dev/null; then
+		echo "  Error: uv is not installed"
+		echo "krayt requires uv to run. You can install it with:"
+		echo "    curl -LsSf https://astral.sh/uv/install.sh | sh"
+		echo ""
+		echo "Or visit: https://github.com/astral/uv for more installation options"
+		echo ""
+		fail "uv not found"
+	fi
+}
+function install {
+	#settings
+	USER="waylonwalker"
+	PROG="krayt"
+	ASPROG="krayt"
+	MOVE="true"
+	RELEASE="{{VERSION}}"
+	INSECURE="false"
+	OUT_DIR="/usr/local/bin"
+	GH="https://github.com"
+	#bash check
+	[ ! "$BASH_VERSION" ] && fail "Please use bash instead"
+	[ ! -d $OUT_DIR ] && fail "output directory missing: $OUT_DIR"
+	#dependency check, assume we are a standard POISX machine
+	which find >/dev/null || fail "find not installed"
+	which xargs >/dev/null || fail "xargs not installed"
+	which sort >/dev/null || fail "sort not installed"
+	which tail >/dev/null || fail "tail not installed"
+	which cut >/dev/null || fail "cut not installed"
+	which du >/dev/null || fail "du not installed"
+	#choose an HTTP client
+	GET=""
+	if which curl >/dev/null; then
+		GET="curl"
+		if [[ $INSECURE = "true" ]]; then GET="$GET --insecure"; fi
+		GET="$GET --fail -# -L"
+	elif which wget >/dev/null; then
+		GET="wget"
+		if [[ $INSECURE = "true" ]]; then GET="$GET --no-check-certificate"; fi
+		GET="$GET -qO-"
+	else
+		fail "neither wget/curl are installed"
+	fi
+	#find OS
+	case $(uname -s) in
+	Darwin) OS="darwin" ;;
+	Linux) OS="linux" ;;
+	*) fail "unknown os: $(uname -s)" ;;
+	esac
+	#find ARCH
+	if uname -m | grep -E '(arm|aarch)64' >/dev/null; then
+		ARCH="aarch64"
+	elif uname -m | grep 64 >/dev/null; then
+		ARCH="x86_64"
+	else
+		fail "unknown arch: $(uname -m)"
+	fi
+	#choose from asset list
+	URL=""
+	FTYPE=""
+	VERSION=${RELEASE#v}
+	if [[ $VERSION == "" ]]; then
+		VERSION=$(curl -s https://api.github.com/repos/$USER/$PROG/releases/latest | grep -o '"tag_name": "[^"]*' | cut -d'"' -f4)
+	fi
+	if [[ $VERSION == "" ]]; then
+		fail "cannot find latest version"
+	fi
+	VERSION=${VERSION#v}
+	ASSET_URL="$GH/$USER/$PROG/releases/download/v$VERSION/${PROG}-${VERSION}-${ARCH}-unknown-${OS}-gnu.tar.gz"
+	echo "Installing $PROG v$VERSION..."
+	echo "Downloading binary from $ASSET_URL"
+	#enter tempdir
+	cd $TMP_DIR
+	#download and unpack
+	if [[ $ASSET_URL =~ \.gz$ ]]; then
+		which tar >/dev/null || fail "tar not installed"
+		if [[ $GET =~ ^curl ]]; then
+			curl -s ${ASSET_URL} | tar zx || fail "download failed"
+		else
+			wget -qO- ${ASSET_URL} | tar zx || fail "download failed"
+		fi
+	else
+		fail "unknown file type: $ASSET_URL"
+	fi
+	#check for error
+	cd ${PROG}-${VERSION}-${ARCH}-unknown-${OS}-gnu
+	#move binary
+	if [[ -f "${PROG}.py" ]]; then
+		chmod +x "${PROG}.py"
+		if [[ $MOVE == "true" ]]; then
+			echo "Moving binary to $OUT_DIR/$ASPROG"
+			# Create a wrapper script to ensure uv is used
+			cat > "$OUT_DIR/$ASPROG" << EOF
+#!/bin/bash
+exec uv run --quiet --script "$OUT_DIR/${ASPROG}.py" "\$@"
+EOF
+			chmod +x "$OUT_DIR/$ASPROG"
+			mv "${PROG}.py" "$OUT_DIR/${ASPROG}.py" || fail "Cannot move binary to $OUT_DIR"
+		else
+			echo "Moving binary to $OUT_DIR/${ASPROG}.py"
+			mv "${PROG}.py" "$OUT_DIR/${ASPROG}.py" || fail "Cannot move binary to $OUT_DIR"
+		fi
+	else
+		fail "cannot find binary"
+	fi
+	echo "Installation complete!"
+	cleanup
+}
+check_deps
+install

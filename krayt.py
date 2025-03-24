@@ -1,21 +1,38 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
-# requires-python = ">=3.12"
+# requires-python = ">=3.10"
 # dependencies = [
 #     "typer",
 #     "kubernetes",
 #     "iterfzf"
 # ]
 # ///
+"""
+Krayt - The Kubernetes Volume Inspector
+
+Like cracking open a Krayt dragon pearl, this tool helps you inspect what's inside your Kubernetes volumes.
+Hunt down storage issues and explore your persistent data like a true Tatooine dragon hunter.
+
+Features:
+- Create inspector pods with all the tools you need
+- Access volumes and device mounts from any pod
+- Fuzzy search across all namespaces
+- Built-in tools for file exploration and analysis
+- Automatic cleanup of inspector pods
+
+May the Force be with your volumes!
+"""
 
 from iterfzf import iterfzf
 from kubernetes import client, config
 import logging
+import os
 import time
 import typer
 from typing import Any, Optional
 import yaml
-import os
+
+KRAYT_VERSION = "NIGHTLY"
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -57,9 +74,7 @@ def format_volume(v: client.V1Volume) -> dict[str, Any]:
     volume_source = None
     if v.persistent_volume_claim:
         volume_source = {
-            "persistentVolumeClaim": {
-                "claimName": v.persistent_volume_claim.claim_name
-            }
+            "persistentVolumeClaim": {"claimName": v.persistent_volume_claim.claim_name}
         }
     elif v.config_map:
         volume_source = {"configMap": {"name": v.config_map.name}}
@@ -69,14 +84,14 @@ def format_volume(v: client.V1Volume) -> dict[str, Any]:
         volume_source = {
             "hostPath": {
                 "path": v.host_path.path,
-                "type": v.host_path.type if v.host_path.type else None
+                "type": v.host_path.type if v.host_path.type else None,
             }
         }
     elif v.empty_dir:  # Add support for emptyDir volumes (used for /dev/shm)
         volume_source = {
             "emptyDir": {
                 "medium": v.empty_dir.medium if v.empty_dir.medium else None,
-                "sizeLimit": v.empty_dir.size_limit if v.empty_dir.size_limit else None
+                "sizeLimit": v.empty_dir.size_limit if v.empty_dir.size_limit else None,
             }
         }
 
@@ -157,34 +172,36 @@ def get_pod_volumes_and_mounts(pod_spec):
         for v in pod_spec.spec.volumes:
             # Handle device mounts
             if v.name in ["cache-volume"]:
-                volumes.append(client.V1Volume(
-                    name=v.name,
-                    empty_dir=client.V1EmptyDirVolumeSource(
-                        medium="Memory"
+                volumes.append(
+                    client.V1Volume(
+                        name=v.name,
+                        empty_dir=client.V1EmptyDirVolumeSource(medium="Memory"),
                     )
-                ))
+                )
             elif v.name in ["coral-device"]:
-                volumes.append(client.V1Volume(
-                    name=v.name,
-                    host_path=client.V1HostPathVolumeSource(
-                        path="/dev/apex_0",
-                        type="CharDevice"
+                volumes.append(
+                    client.V1Volume(
+                        name=v.name,
+                        host_path=client.V1HostPathVolumeSource(
+                            path="/dev/apex_0", type="CharDevice"
+                        ),
                     )
-                ))
+                )
             elif v.name in ["qsv-device"]:
-                volumes.append(client.V1Volume(
-                    name=v.name,
-                    host_path=client.V1HostPathVolumeSource(
-                        path="/dev/dri",
-                        type="Directory"
+                volumes.append(
+                    client.V1Volume(
+                        name=v.name,
+                        host_path=client.V1HostPathVolumeSource(
+                            path="/dev/dri", type="Directory"
+                        ),
                     )
-                ))
+                )
             else:
                 volumes.append(v)
 
     # Filter out None values from volumes
     volumes = [v for v in volumes if format_volume(v)]
-    
+
     return volume_mounts, volumes
 
 
@@ -230,9 +247,12 @@ def get_pod_env_and_secrets(api, namespace, pod_name):
     return env_vars, secret_volumes
 
 
-def create_inspector_job(api, namespace, pod_name, volume_mounts, volumes):
+def create_inspector_job(
+    api, namespace: str, pod_name: str, volume_mounts: list, volumes: list
+):
+    """Create a Krayt inspector job with the given mounts"""
     timestamp = int(time.time())
-    job_name = f"{pod_name}-inspector-{timestamp}"
+    job_name = f"{pod_name}-krayt-{timestamp}"
 
     # Get environment variables and secrets from the target pod
     env_vars, secret_volumes = get_pod_env_and_secrets(api, namespace, pod_name)
@@ -258,7 +278,8 @@ def create_inspector_job(api, namespace, pod_name, volume_mounts, volumes):
     # Format mount and PVC info for MOTD
     mount_info = []
     for vm in formatted_mounts:
-        mount_info.append(f"{vm['name']}:{vm['mountPath']}")
+        if vm:
+            mount_info.append(f"{vm['name']}:{vm['mountPath']}")
 
     pvc_info = []
     for v in volumes:
@@ -271,16 +292,16 @@ def create_inspector_job(api, namespace, pod_name, volume_mounts, volumes):
         "metadata": {
             "name": job_name,
             "namespace": namespace,
-            "labels": {"app": "pvc-inspector"},
+            "labels": {"app": "krayt"},
         },
         "spec": {
             "ttlSecondsAfterFinished": 0,  # Delete immediately after completion
             "template": {
-                "metadata": {"labels": {"app": "pvc-inspector"}},
+                "metadata": {"labels": {"app": "krayt"}},
                 "spec": {
                     "containers": [
                         {
-                            "name": "inspector",
+                            "name": "krayt",
                             "image": "alpine:latest",  # Use Alpine as base for package management
                             "command": [
                                 "sh",
@@ -304,8 +325,10 @@ apk add ripgrep exa ncdu dust \
 update_motd() {
     cat << EOF > /etc/motd
 ====================================
-PVC Inspector Pod
+Krayt Dragon's Lair
 ====================================
+"Inside every volume lies a pearl of wisdom waiting to be discovered."
+
 Mounted Volumes:
 $(echo "$MOUNTS" | tr ',' '\\n' | sed 's/^/- /')
 
@@ -318,7 +341,7 @@ $(for d in /mnt/secrets/*; do if [ -d "$d" ]; then echo "- $(basename $d)"; fi; 
 Environment Variables:
 $(env | sort | sed 's/^/- /')
 
-Available Tools:
+Your Hunting Tools:
 File Navigation:
 - lf: Terminal file manager (run 'lf')
 - exa: Modern ls (run 'ls', 'll', or 'tree')
@@ -377,7 +400,7 @@ alias cat='bat --paging=never'
 
 # Function to show detailed tool help
 tools-help() {
-    echo "PVC Inspector Tools Guide:"
+    echo "Krayt Dragon Hunter's Guide:"
     echo
     echo "File Navigation:"
     echo "  lf                   : Navigate with arrow keys, q to quit, h for help"
@@ -475,16 +498,37 @@ PROTECTED_NAMESPACES = {
     "linkerd",
 }
 
+
+def version_callback(value: bool):
+    if value:
+        typer.echo(f"Version: {KRAYT_VERSION}")
+        raise typer.Exit()
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    version: bool = typer.Option(
+        False, "--version", "-v", help="Show version", callback=version_callback
+    ),
+):
+    """
+    Krack open a Krayt dragon!
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.get_help()
+
+
 @app.command()
-def exec_inspector(
+def exec(
     namespace: Optional[str] = typer.Option(
         None,
         help="Kubernetes namespace. If not specified, will search for inspectors across all namespaces.",
     ),
 ):
     """
-    Execute a shell in a running inspector pod. If multiple inspectors are found,
-    presents a fuzzy finder to select one.
+    Enter the Krayt dragon's lair! Connect to a running inspector pod.
+    If multiple inspectors are found, you'll get to choose which one to explore.
     """
     config.load_kube_config()
     batch_api = client.BatchV1Api()
@@ -493,13 +537,11 @@ def exec_inspector(
         if namespace:
             logging.debug(f"Listing jobs in namespace {namespace}")
             jobs = batch_api.list_namespaced_job(
-                namespace=namespace, label_selector="app=pvc-inspector"
+                namespace=namespace, label_selector="app=krayt"
             )
         else:
             logging.debug("Listing jobs in all namespaces")
-            jobs = batch_api.list_job_for_all_namespaces(
-                label_selector="app=pvc-inspector"
-            )
+            jobs = batch_api.list_job_for_all_namespaces(label_selector="app=krayt")
 
         running_inspectors = []
         for job in jobs.items:
@@ -507,11 +549,13 @@ def exec_inspector(
             v1 = client.CoreV1Api()
             pods = v1.list_namespaced_pod(
                 namespace=job.metadata.namespace,
-                label_selector=f"job-name={job.metadata.name}"
+                label_selector=f"job-name={job.metadata.name}",
             )
             for pod in pods.items:
                 if pod.status.phase == "Running":
-                    running_inspectors.append((pod.metadata.name, pod.metadata.namespace))
+                    running_inspectors.append(
+                        (pod.metadata.name, pod.metadata.namespace)
+                    )
 
         if not running_inspectors:
             typer.echo("No running inspector pods found.")
@@ -527,7 +571,10 @@ def exec_inspector(
 
         # Execute the shell
         typer.echo(f"Connecting to inspector {pod_namespace}/{pod_name}...")
-        os.execvp("kubectl", ["kubectl", "exec", "-it", "-n", pod_namespace, pod_name, "--", "sh", "-l"])
+        os.execvp(
+            "kubectl",
+            ["kubectl", "exec", "-it", "-n", pod_namespace, pod_name, "--", "sh", "-l"],
+        )
 
     except client.exceptions.ApiException as e:
         logging.error(f"Failed to list jobs: {e}")
@@ -536,19 +583,21 @@ def exec_inspector(
 
 
 @app.command()
-def cleanup_inspectors(
+def clean(
     namespace: Optional[str] = typer.Option(
         None,
         help="Kubernetes namespace. If not specified, will cleanup in all namespaces.",
     ),
     yes: bool = typer.Option(
         False,
-        "--yes", "-y",
+        "--yes",
+        "-y",
         help="Skip confirmation prompt.",
     ),
 ):
     """
-    Delete all PVC inspector jobs in the specified namespace or all namespaces
+    Clean up after your hunt! Remove all Krayt inspector jobs.
+    Use --yes/-y to skip confirmation and clean up immediately.
     """
     config.load_kube_config()
     batch_api = client.BatchV1Api()
@@ -560,24 +609,28 @@ def cleanup_inspectors(
                 raise typer.Exit(1)
             logging.debug(f"Listing jobs in namespace {namespace}")
             jobs = batch_api.list_namespaced_job(
-                namespace=namespace, label_selector="app=pvc-inspector"
+                namespace=namespace, label_selector="app=krayt"
             )
         else:
             logging.debug("Listing jobs in all namespaces")
-            jobs = batch_api.list_job_for_all_namespaces(
-                label_selector="app=pvc-inspector"
-            )
+            jobs = batch_api.list_job_for_all_namespaces(label_selector="app=krayt")
 
         # Filter out jobs in protected namespaces
-        jobs.items = [job for job in jobs.items if job.metadata.namespace not in PROTECTED_NAMESPACES]
+        jobs.items = [
+            job
+            for job in jobs.items
+            if job.metadata.namespace not in PROTECTED_NAMESPACES
+        ]
 
         if not jobs.items:
-            typer.echo("No PVC inspector jobs found.")
+            typer.echo("No Krayt inspector jobs found.")
             return
 
         # Show confirmation prompt
         if not yes:
-            job_list = "\n".join(f"  {job.metadata.namespace}/{job.metadata.name}" for job in jobs.items)
+            job_list = "\n".join(
+                f"  {job.metadata.namespace}/{job.metadata.name}" for job in jobs.items
+            )
             typer.echo(f"The following inspector jobs will be deleted:\n{job_list}")
             if not typer.confirm("Are you sure you want to continue?"):
                 typer.echo("Operation cancelled.")
@@ -611,15 +664,16 @@ def cleanup_inspectors(
 
 
 @app.command()
-def create_inspector(
+def create(
     namespace: Optional[str] = typer.Option(
         None,
         help="Kubernetes namespace. If not specified, will search for pods across all namespaces.",
     ),
 ):
     """
-    Create a PVC inspector job. If namespace is not specified, will search for pods across all namespaces.
-    The inspector job will be created in the same namespace as the selected pod.
+    Krack open a Krayt dragon! Create an inspector pod to explore what's inside your volumes.
+    If namespace is not specified, will search for pods across all namespaces.
+    The inspector will be created in the same namespace as the selected pod.
     """
     pods = get_pods(namespace)
     if not pods:
@@ -640,6 +694,12 @@ def create_inspector(
 
     # Output the job manifest
     typer.echo(yaml.dump(clean_dict(inspector_job), sort_keys=False))
+
+
+@app.command()
+def version():
+    """Show the version of Krayt."""
+    typer.echo(f"Version: {KRAYT_VERSION}")
 
 
 if __name__ == "__main__":
