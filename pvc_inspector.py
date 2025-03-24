@@ -15,6 +15,7 @@ import time
 import typer
 from typing import Any, Optional
 import yaml
+import os
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -458,6 +459,157 @@ sleep 3600
     return inspector_job
 
 
+PROTECTED_NAMESPACES = {
+    "kube-system",
+    "kube-public",
+    "kube-node-lease",
+    "argo-events",
+    "argo-rollouts",
+    "argo-workflows",
+    "argocd",
+    "cert-manager",
+    "ingress-nginx",
+    "monitoring",
+    "prometheus",
+    "istio-system",
+    "linkerd",
+}
+
+@app.command()
+def exec_inspector(
+    namespace: Optional[str] = typer.Option(
+        None,
+        help="Kubernetes namespace. If not specified, will search for inspectors across all namespaces.",
+    ),
+):
+    """
+    Execute a shell in a running inspector pod. If multiple inspectors are found,
+    presents a fuzzy finder to select one.
+    """
+    config.load_kube_config()
+    batch_api = client.BatchV1Api()
+
+    try:
+        if namespace:
+            logging.debug(f"Listing jobs in namespace {namespace}")
+            jobs = batch_api.list_namespaced_job(
+                namespace=namespace, label_selector="app=pvc-inspector"
+            )
+        else:
+            logging.debug("Listing jobs in all namespaces")
+            jobs = batch_api.list_job_for_all_namespaces(
+                label_selector="app=pvc-inspector"
+            )
+
+        running_inspectors = []
+        for job in jobs.items:
+            # Get the pod for this job
+            v1 = client.CoreV1Api()
+            pods = v1.list_namespaced_pod(
+                namespace=job.metadata.namespace,
+                label_selector=f"job-name={job.metadata.name}"
+            )
+            for pod in pods.items:
+                if pod.status.phase == "Running":
+                    running_inspectors.append((pod.metadata.name, pod.metadata.namespace))
+
+        if not running_inspectors:
+            typer.echo("No running inspector pods found.")
+            raise typer.Exit(1)
+
+        if len(running_inspectors) == 1:
+            pod_name, pod_namespace = running_inspectors[0]
+        else:
+            pod_name, pod_namespace = fuzzy_select(running_inspectors)
+            if not pod_name:
+                typer.echo("No inspector selected.")
+                raise typer.Exit(1)
+
+        # Execute the shell
+        typer.echo(f"Connecting to inspector {pod_namespace}/{pod_name}...")
+        os.execvp("kubectl", ["kubectl", "exec", "-it", "-n", pod_namespace, pod_name, "--", "sh", "-l"])
+
+    except client.exceptions.ApiException as e:
+        logging.error(f"Failed to list jobs: {e}")
+        typer.echo(f"Failed to list jobs: {e}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command()
+def cleanup_inspectors(
+    namespace: Optional[str] = typer.Option(
+        None,
+        help="Kubernetes namespace. If not specified, will cleanup in all namespaces.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes", "-y",
+        help="Skip confirmation prompt.",
+    ),
+):
+    """
+    Delete all PVC inspector jobs in the specified namespace or all namespaces
+    """
+    config.load_kube_config()
+    batch_api = client.BatchV1Api()
+
+    try:
+        if namespace:
+            if namespace in PROTECTED_NAMESPACES:
+                typer.echo(f"Error: Cannot cleanup in protected namespace {namespace}")
+                raise typer.Exit(1)
+            logging.debug(f"Listing jobs in namespace {namespace}")
+            jobs = batch_api.list_namespaced_job(
+                namespace=namespace, label_selector="app=pvc-inspector"
+            )
+        else:
+            logging.debug("Listing jobs in all namespaces")
+            jobs = batch_api.list_job_for_all_namespaces(
+                label_selector="app=pvc-inspector"
+            )
+
+        # Filter out jobs in protected namespaces
+        jobs.items = [job for job in jobs.items if job.metadata.namespace not in PROTECTED_NAMESPACES]
+
+        if not jobs.items:
+            typer.echo("No PVC inspector jobs found.")
+            return
+
+        # Show confirmation prompt
+        if not yes:
+            job_list = "\n".join(f"  {job.metadata.namespace}/{job.metadata.name}" for job in jobs.items)
+            typer.echo(f"The following inspector jobs will be deleted:\n{job_list}")
+            if not typer.confirm("Are you sure you want to continue?"):
+                typer.echo("Operation cancelled.")
+                return
+
+        # Delete each job
+        for job in jobs.items:
+            try:
+                logging.debug(
+                    f"Deleting job {job.metadata.namespace}/{job.metadata.name}"
+                )
+                batch_api.delete_namespaced_job(
+                    name=job.metadata.name,
+                    namespace=job.metadata.namespace,
+                    body=client.V1DeleteOptions(propagation_policy="Background"),
+                )
+                typer.echo(f"Deleted job: {job.metadata.namespace}/{job.metadata.name}")
+            except client.exceptions.ApiException as e:
+                logging.error(
+                    f"Failed to delete job {job.metadata.namespace}/{job.metadata.name}: {e}"
+                )
+                typer.echo(
+                    f"Failed to delete job {job.metadata.namespace}/{job.metadata.name}: {e}",
+                    err=True,
+                )
+
+    except client.exceptions.ApiException as e:
+        logging.error(f"Failed to list jobs: {e}")
+        typer.echo(f"Failed to list jobs: {e}", err=True)
+        raise typer.Exit(1)
+
+
 @app.command()
 def create_inspector(
     namespace: Optional[str] = typer.Option(
@@ -488,64 +640,6 @@ def create_inspector(
 
     # Output the job manifest
     typer.echo(yaml.dump(clean_dict(inspector_job), sort_keys=False))
-
-
-@app.command()
-def cleanup_inspectors(
-    namespace: Optional[str] = typer.Option(
-        None,
-        help="Kubernetes namespace. If not specified, will cleanup in all namespaces.",
-    ),
-):
-    """
-    Delete all PVC inspector jobs in the specified namespace or all namespaces
-    """
-    config.load_kube_config()
-    batch_api = client.BatchV1Api()
-
-    try:
-        if namespace:
-            logging.debug(f"Listing jobs in namespace {namespace}")
-            jobs = batch_api.list_namespaced_job(
-                namespace=namespace, label_selector="app=pvc-inspector"
-            )
-        else:
-            logging.debug("Listing jobs in all namespaces")
-            jobs = batch_api.list_job_for_all_namespaces(
-                label_selector="app=pvc-inspector"
-            )
-
-        if not jobs.items:
-            typer.echo("No PVC inspector jobs found.")
-            return
-
-        # Delete each job
-        for job in jobs.items:
-            try:
-                logging.debug(
-                    f"Deleting job {job.metadata.namespace}/{job.metadata.name}"
-                )
-                batch_api.delete_namespaced_job(
-                    name=job.metadata.name,
-                    namespace=job.metadata.namespace,
-                    body=client.V1DeleteOptions(propagation_policy="Background"),
-                )
-                typer.echo(f"Deleted job: {job.metadata.namespace}/{job.metadata.name}")
-            except client.exceptions.ApiException as e:
-                logging.error(
-                    f"Failed to delete job {job.metadata.namespace}/{job.metadata.name}: {e}"
-                )
-                typer.echo(
-                    f"Failed to delete job {job.metadata.namespace}/{job.metadata.name}: {e}",
-                    err=True,
-                )
-
-    except client.exceptions.ApiException as e:
-        logging.error(f"Failed to list jobs: {e}")
-        typer.echo(f"Failed to list jobs: {e}", err=True)
-        raise typer.Exit(1)
-
-    typer.echo("Cleanup complete.")
 
 
 if __name__ == "__main__":
