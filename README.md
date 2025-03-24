@@ -1,5 +1,7 @@
 # Krayt - The Kubernetes Volume Inspector
 
+![krayt hero image](./krayt.webp "A dark, cartoon-style wide-format illustration featuring a heroic explorer standing in a twilight desert beside a cracked-open dragon skull. The explorer holds a glowing pearl that reveals floating icons representing data and technology. The hero wears utility gear and a sword, with terminal and file icons on their belt. The desert backdrop includes jagged rocks, two moons in a starry sky, and moody blue and purple tones. At the top, the word “KRAYT” is displayed in bold, tech-inspired fantasy lettering.")
+
 Like cracking open a Krayt dragon pearl, this tool helps you inspect what's inside your Kubernetes volumes.
 Hunt down storage issues and explore your persistent data like a true Tatooine dragon hunter.
 
