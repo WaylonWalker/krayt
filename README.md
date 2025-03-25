@@ -38,6 +38,12 @@ This will install the `krayt` command to `/usr/local/bin`.
 # Create a new inspector and apply it directly
 krayt create | kubectl apply -f -
 
+# Use a custom image
+krayt create --image custom-image:latest | kubectl apply -f -
+
+# Use a private image with pull secret
+krayt create --image private-registry.com/image:latest --imagepullsecret my-registry-secret | kubectl apply -f -
+
 # Or review the manifest first
 krayt create > inspector.yaml
 kubectl apply -f inspector.yaml

@@ -1,3 +1,10 @@
+## 0.2.0
+
+### Added
+
+- Support for imagepullsecret flag on krayt create command
+  - Allows pulling from private container registries by specifying an image pull secret
+
 ## 0.1.0
 
 ### Added

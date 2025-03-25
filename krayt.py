@@ -336,6 +336,7 @@ def create_inspector_job(
     volume_mounts: list,
     volumes: list,
     image: str = "alpine:latest",
+    imagepullsecret: Optional[str] = None,
 ):
     """Create a Krayt inspector job with the given mounts"""
     timestamp = int(time.time())
@@ -532,6 +533,7 @@ def create_inspector_job(
                         }
                     ],
                     "volumes": [format_volume(v) for v in volumes if format_volume(v)],
+                    "imagePullSecrets": [{"name": imagepullsecret}] if imagepullsecret else None,
                     "restartPolicy": "Never",
                 },
             },
@@ -777,6 +779,11 @@ def create(
         "-i",
         help="Container image to use for the inspector pod",
     ),
+    imagepullsecret: Optional[str] = typer.Option(
+        None,
+        "--imagepullsecret",
+        help="Name of the image pull secret to use for pulling private images",
+    ),
 ):
     """
     Krack open a Krayt dragon! Create an inspector pod to explore what's inside your volumes.
@@ -804,6 +811,7 @@ def create(
         volume_mounts,
         volumes,
         image=image,
+        imagepullsecret=imagepullsecret,
     )
 
     # Output the job manifest
