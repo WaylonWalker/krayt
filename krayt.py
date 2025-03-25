@@ -307,7 +307,7 @@ EOF"""
 
 
 def create_inspector_job(
-    api, namespace: str, pod_name: str, volume_mounts: list, volumes: list
+    api, namespace: str, pod_name: str, volume_mounts: list, volumes: list, image: str = "alpine:latest"
 ):
     """Create a Krayt inspector job with the given mounts"""
     timestamp = int(time.time())
@@ -447,8 +447,8 @@ def create_inspector_job(
                 "spec": {
                     "containers": [
                         {
-                            "name": "krayt",
-                            "image": "alpine:latest",  # Use Alpine as base for package management
+                            "name": "inspector",
+                            "image": image,  
                             "command": [
                                 "sh",
                                 "-c",
@@ -694,6 +694,12 @@ def create(
         None,
         help="Kubernetes namespace. If not specified, will search for pods across all namespaces.",
     ),
+    image: str = typer.Option(
+        "alpine:latest",
+        "--image",
+        "-i",
+        help="Container image to use for the inspector pod",
+    ),
 ):
     """
     Krack open a Krayt dragon! Create an inspector pod to explore what's inside your volumes.
@@ -714,7 +720,7 @@ def create(
     volume_mounts, volumes = get_pod_volumes_and_mounts(pod_spec)
 
     inspector_job = create_inspector_job(
-        client.CoreV1Api(), selected_namespace, selected_pod, volume_mounts, volumes
+        client.CoreV1Api(), selected_namespace, selected_pod, volume_mounts, volumes, image=image
     )
 
     # Output the job manifest
