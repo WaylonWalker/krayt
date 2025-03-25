@@ -13,7 +13,7 @@ function fail {
 	echo "Error: $msg" 1>&2
 	exit 1
 }
-function check_deps {
+function check_uv {
 	if ! command -v uv &>/dev/null; then
 		echo "  Error: uv is not installed"
 		echo "krayt requires uv to run. You can install it with:"
@@ -24,15 +24,67 @@ function check_deps {
 		fail "uv not found"
 	fi
 }
+
+function setup_config_dir {
+    # Create config directory
+    CONFIG_DIR="${HOME}/.config/krayt"
+    mkdir -p "${CONFIG_DIR}/init.d"
+    
+    # Create example init script if it doesn't exist
+    EXAMPLE_SCRIPT="${CONFIG_DIR}/init.d/00_proxy.sh.example"
+    if [ ! -f "$EXAMPLE_SCRIPT" ]; then
+        cat > "$EXAMPLE_SCRIPT" << 'EOF'
+#!/bin/sh
+# Example initialization script for Krayt inspector pods
+# This script runs before any packages are installed
+# To use this script, rename it to remove the .example extension
+
+# Example: Set up proxy configuration
+setup_proxy() {
+    # Uncomment and modify these lines to set up your proxy
+    # export HTTP_PROXY="http://proxy.example.com:8080"
+    # export HTTPS_PROXY="http://proxy.example.com:8080"
+    # export NO_PROXY="localhost,127.0.0.1,.example.com"
+    
+    # Set up proxy for apk if needed
+    if [ ! -z "$HTTP_PROXY" ]; then
+        echo "proxy = $HTTP_PROXY" >> /etc/apk/repositories
+    fi
+}
+
+# Example: Add custom Alpine repositories
+setup_repos() {
+    # Uncomment to add custom repos
+    # echo "http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories
+    :
+}
+
+# Run the setup functions
+setup_proxy
+setup_repos
+
+# Log the configuration
+echo "Krayt inspector pod initialization complete"
+echo "Proxy settings:"
+echo "HTTP_PROXY=$HTTP_PROXY"
+echo "HTTPS_PROXY=$HTTPS_PROXY"
+echo "NO_PROXY=$NO_PROXY"
+EOF
+    fi
+    
+    echo "Created config directory at ${CONFIG_DIR}"
+    echo "Example init script created at ${EXAMPLE_SCRIPT}"
+}
+
 function install {
 	#settings
 	USER="waylonwalker"
 	PROG="krayt"
 	ASPROG="krayt"
-	MOVE="true"
+	MOVE="false"
 	RELEASE="{{VERSION}}"
 	INSECURE="false"
-	OUT_DIR="/usr/local/bin"
+	OUT_DIR="$(pwd)"
 	GH="https://github.com"
 	#bash check
 	[ ! "$BASH_VERSION" ] && fail "Please use bash instead"
@@ -57,70 +109,126 @@ function install {
 	else
 		fail "neither wget/curl are installed"
 	fi
-	#find OS
+	#debug HTTP
+	if [ "$DEBUG" == "1" ]; then
+		GET="$GET -v"
+	fi
+	#optional auth to install from private repos
+	#NOTE: this also needs to be set on your instance of installer
+	AUTH="${GITHUB_TOKEN}"
+	if [ ! -z "$AUTH" ]; then
+		GET="$GET -H 'Authorization: $AUTH'"
+	fi
+	#find OS #TODO BSDs and other posixs
 	case $(uname -s) in
 	Darwin) OS="darwin" ;;
 	Linux) OS="linux" ;;
 	*) fail "unknown os: $(uname -s)" ;;
 	esac
 	#find ARCH
-	if uname -m | grep -E '(arm|aarch)64' >/dev/null; then
-		ARCH="aarch64"
+	if uname -m | grep -E '(arm|arch)64' >/dev/null; then
+		ARCH="arm64"
+
+		# no m1 assets. if on mac arm64, rosetta allows fallback to amd64
+		if [[ $OS = "darwin" ]]; then
+			ARCH="amd64"
+		fi
+
 	elif uname -m | grep 64 >/dev/null; then
-		ARCH="x86_64"
+		ARCH="amd64"
+	elif uname -m | grep arm >/dev/null; then
+		ARCH="arm" #TODO armv6/v7
+	elif uname -m | grep 386 >/dev/null; then
+		ARCH="386"
 	else
 		fail "unknown arch: $(uname -m)"
 	fi
 	#choose from asset list
 	URL=""
 	FTYPE=""
-	VERSION=${RELEASE#v}
-	if [[ $VERSION == "" ]]; then
-		VERSION=$(curl -s https://api.github.com/repos/$USER/$PROG/releases/latest | grep -o '"tag_name": "[^"]*' | cut -d'"' -f4)
+	case "${OS}_${ARCH}" in
+	"linux_amd64")
+		URL="https://github.com/WaylonWalker/nvim-manager/releases/download/v${RELEASE}/nvim-manager-${RELEASE}-x86_64-unknown-linux-gnu.tar.gz"
+		FTYPE=".tar.gz"
+		;;
+	"linux_arm64")
+		URL="https://github.com/WaylonWalker/nvim-manager/releases/download/v${RELEASE}/nvim-manager-${RELEASE}-aarch64-unknown-linux-gnu.tar.gz"
+		FTYPE=".tar.gz"
+		;;
+	*) fail "No asset for platform ${OS}-${ARCH}" ;;
+	esac
+	#got URL! download it...
+	echo -n "Downloading"
+	echo -n " $USER/$PROG"
+	if [ ! -z "$RELEASE" ]; then
+		echo -n " $RELEASE"
 	fi
-	if [[ $VERSION == "" ]]; then
-		fail "cannot find latest version"
+	if [ ! -z "$ASPROG" ]; then
+		echo -n " as $ASPROG"
 	fi
-	VERSION=${VERSION#v}
-	ASSET_URL="$GH/$USER/$PROG/releases/download/v$VERSION/${PROG}-${VERSION}-${ARCH}-unknown-${OS}-gnu.tar.gz"
-	echo "Installing $PROG v$VERSION..."
-	echo "Downloading binary from $ASSET_URL"
+	echo -n " (${OS}/${ARCH})"
+
+	echo "....."
+
 	#enter tempdir
+	mkdir -p $TMP_DIR
 	cd $TMP_DIR
-	#download and unpack
-	if [[ $ASSET_URL =~ \.gz$ ]]; then
-		which tar >/dev/null || fail "tar not installed"
-		if [[ $GET =~ ^curl ]]; then
-			curl -s ${ASSET_URL} | tar zx || fail "download failed"
-		else
-			wget -qO- ${ASSET_URL} | tar zx || fail "download failed"
-		fi
+	if [[ $FTYPE = ".gz" ]]; then
+		which gzip >/dev/null || fail "gzip is not installed"
+		bash -c "$GET $URL" | gzip -d - >$PROG || fail "download failed"
+	elif [[ $FTYPE = ".bz2" ]]; then
+		which bzip2 >/dev/null || fail "bzip2 is not installed"
+		bash -c "$GET $URL" | bzip2 -d - >$PROG || fail "download failed"
+	elif [[ $FTYPE = ".tar.bz" ]] || [[ $FTYPE = ".tar.bz2" ]]; then
+		which tar >/dev/null || fail "tar is not installed"
+		which bzip2 >/dev/null || fail "bzip2 is not installed"
+		bash -c "$GET $URL" | tar jxf - || fail "download failed"
+	elif [[ $FTYPE = ".tar.gz" ]] || [[ $FTYPE = ".tgz" ]]; then
+		which tar >/dev/null || fail "tar is not installed"
+		which gzip >/dev/null || fail "gzip is not installed"
+		bash -c "$GET $URL" | tar zxf - || fail "download failed"
+	elif [[ $FTYPE = ".zip" ]]; then
+		which unzip >/dev/null || fail "unzip is not installed"
+		bash -c "$GET $URL" >tmp.zip || fail "download failed"
+		unzip -o -qq tmp.zip || fail "unzip failed"
+		rm tmp.zip || fail "cleanup failed"
+	elif [[ $FTYPE = ".bin" ]]; then
+		bash -c "$GET $URL" >"nvim-manager_${OS}_${ARCH}" || fail "download failed"
 	else
-		fail "unknown file type: $ASSET_URL"
+		fail "unknown file type: $FTYPE"
 	fi
-	#check for error
-	cd ${PROG}-${VERSION}-${ARCH}-unknown-${OS}-gnu
-	#move binary
-	if [[ -f "${PROG}.py" ]]; then
-		chmod +x "${PROG}.py"
-		if [[ $MOVE == "true" ]]; then
-			echo "Moving binary to $OUT_DIR/$ASPROG"
-			# Create a wrapper script to ensure uv is used
-			cat > "$OUT_DIR/$ASPROG" << EOF
-#!/bin/bash
-exec uv run --quiet --script "$OUT_DIR/${ASPROG}.py" "\$@"
-EOF
-			chmod +x "$OUT_DIR/$ASPROG"
-			mv "${PROG}.py" "$OUT_DIR/${ASPROG}.py" || fail "Cannot move binary to $OUT_DIR"
-		else
-			echo "Moving binary to $OUT_DIR/${ASPROG}.py"
-			mv "${PROG}.py" "$OUT_DIR/${ASPROG}.py" || fail "Cannot move binary to $OUT_DIR"
-		fi
+	#search subtree largest file (bin)
+	TMP_BIN=$(find . -type f | xargs du | sort -n | tail -n 1 | cut -f 2)
+	if [ ! -f "$TMP_BIN" ]; then
+		fail "could not find find binary (largest file)"
+	fi
+	#ensure its larger than 1MB
+	#TODO linux=elf/darwin=macho file detection?
+	if [[ $(du -m $TMP_BIN | cut -f1) -lt 1 ]]; then
+		fail "no binary found ($TMP_BIN is not larger than 1MB)"
+	fi
+	#move into PATH or cwd
+	chmod +x $TMP_BIN || fail "chmod +x failed"
+	DEST="$OUT_DIR/$PROG"
+	if [ ! -z "$ASPROG" ]; then
+		DEST="$OUT_DIR/$ASPROG"
+	fi
+	#move without sudo
+	OUT=$(mv $TMP_BIN $DEST 2>&1)
+	STATUS=$?
+	# failed and string contains "Permission denied"
+	if [ $STATUS -ne 0 ]; then
+		if [[ $OUT =~ "Permission denied" ]]; then
+			echo "mv with sudo..."
+			sudo mv $TMP_BIN $DEST || fail "sudo mv failed"
 	else
-		fail "cannot find binary"
+			fail "mv failed ($OUT)"
+		fi
 	fi
-	echo "Installation complete!"
+	echo "Downloaded to $DEST"
+	#done
 	cleanup
+	check_uv
 }
-check_deps
 install
+setup_config_dir

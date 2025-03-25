@@ -13,20 +13,15 @@ Krayt - The Kubernetes Volume Inspector
 Like cracking open a Krayt dragon pearl, this tool helps you inspect what's inside your Kubernetes volumes.
 Hunt down storage issues and explore your persistent data like a true Tatooine dragon hunter.
 
-Features:
-- Create inspector pods with all the tools you need
-- Access volumes and device mounts from any pod
-- Fuzzy search across all namespaces
-- Built-in tools for file exploration and analysis
-- Automatic cleanup of inspector pods
-
 May the Force be with your volumes!
 """
 
+import os
+import glob
+from pathlib import Path
 from iterfzf import iterfzf
 from kubernetes import client, config
 import logging
-import os
 import time
 import typer
 from typing import Any, Optional
@@ -205,46 +200,110 @@ def get_pod_volumes_and_mounts(pod_spec):
     return volume_mounts, volumes
 
 
-def get_pod_env_and_secrets(api, namespace, pod_name):
-    pod = api.read_namespaced_pod(pod_name, namespace)
-
-    # Get environment variables from the pod
+def get_env_vars_and_secret_volumes(api, namespace: str):
+    """Get environment variables and secret volumes for the inspector pod"""
     env_vars = []
-    for container in pod.spec.containers:
-        if container.env:
-            for env in container.env:
-                env_dict = {"name": env.name}
-                if env.value:
-                    env_dict["value"] = env.value
-                elif env.value_from:
-                    if env.value_from.config_map_key_ref:
-                        env_dict["valueFrom"] = {
-                            "configMapKeyRef": {
-                                "name": env.value_from.config_map_key_ref.name,
-                                "key": env.value_from.config_map_key_ref.key,
-                            }
-                        }
-                    elif env.value_from.secret_key_ref:
-                        env_dict["valueFrom"] = {
-                            "secretKeyRef": {
-                                "name": env.value_from.secret_key_ref.name,
-                                "key": env.value_from.secret_key_ref.key,
-                            }
-                        }
-                    elif env.value_from.field_ref:
-                        env_dict["valueFrom"] = {
-                            "fieldRef": {
-                                "fieldPath": env.value_from.field_ref.field_path
-                            }
-                        }
-                env_vars.append(env_dict)
+    volumes = []
 
-    # Get all volume mounts that are secrets
-    secret_volumes = []
-    if pod.spec.volumes:
-        secret_volumes = [v for v in pod.spec.volumes if v.secret]
+    # Add proxy environment variables if they exist in the host environment
+    proxy_vars = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", 
+                 "http_proxy", "https_proxy", "no_proxy"]
+    
+    for var in proxy_vars:
+        if var in os.environ:
+            env_vars.append({"name": var, "value": os.environ[var]})
 
-    return env_vars, secret_volumes
+    # Look for secret volumes in the namespace
+    try:
+        secrets = api.list_namespaced_secret(namespace)
+        for secret in secrets.items:
+            # Skip service account tokens and other system secrets
+            if (
+                secret.type != "Opaque"
+                or secret.metadata.name.startswith("default-token-")
+            ):
+                continue
+
+            # Mount each secret as a volume
+            volume_name = f"secret-{secret.metadata.name}"
+            volumes.append(
+                client.V1Volume(
+                    name=volume_name,
+                    secret=client.V1SecretVolumeSource(
+                        secret_name=secret.metadata.name
+                    ),
+                )
+            )
+
+    except client.exceptions.ApiException as e:
+        if e.status != 404:  # Ignore if no secrets found
+            logging.warning(f"Failed to list secrets in namespace {namespace}: {e}")
+
+    return env_vars, volumes
+
+
+def get_init_scripts():
+    """Get the contents of init scripts to be run in the pod"""
+    init_dir = Path.home() / ".config" / "krayt" / "init.d"
+    if not init_dir.exists():
+        return ""
+
+    # Sort scripts to ensure consistent execution order
+    scripts = sorted(init_dir.glob("*.sh"))
+    if not scripts:
+        return ""
+    
+    # Create a combined script that will run all init scripts
+    init_script = "#!/bin/sh\n\n"
+    init_script += "echo 'Running initialization scripts...'\n\n"
+    
+    for script in scripts:
+        try:
+            with open(script, 'r') as f:
+                script_content = f.read()
+                if script_content:
+                    init_script += f"echo '=== Running {script.name} ==='\n"
+                    # Write each script to a separate file
+                    init_script += f"cat > /tmp/{script.name} << 'EOFSCRIPT'\n"
+                    init_script += script_content
+                    if not script_content.endswith('\n'):
+                        init_script += '\n'
+                    init_script += "EOFSCRIPT\n\n"
+                    # Make it executable and run it
+                    init_script += f"chmod +x /tmp/{script.name}\n"
+                    init_script += f"/tmp/{script.name} 2>&1 | tee -a /tmp/init.log\n"
+                    init_script += f"echo '=== Finished {script.name} ===\n\n'"
+        except Exception as e:
+            logging.error(f"Failed to load init script {script}: {e}")
+    
+    init_script += "echo 'Initialization scripts complete.'\n"
+    return init_script
+
+
+def get_motd_script(mount_info, pvc_info):
+    """Generate the MOTD script with proper escaping"""
+    return f"""
+# Create MOTD
+cat << 'EOF' > /etc/motd
+====================================
+Krayt Dragon's Lair
+A safe haven for volume inspection
+====================================
+
+"Inside every volume lies a pearl of wisdom waiting to be discovered."
+
+Mounted Volumes:
+$(echo "{','.join(mount_info)}" | tr ',' '\\n' | sed 's/^/- /')
+
+Persistent Volume Claims:
+$(echo "{','.join(pvc_info)}" | tr ',' '\\n' | sed 's/^/- /')
+
+Mounted Secrets:
+$(for d in /mnt/secrets/*; do if [ -d "$d" ]; then echo "- $(basename $d)"; fi; done)
+
+Init Script Status:
+$(if [ -f /tmp/init.log ]; then echo "View initialization log at /tmp/init.log"; fi)
+EOF"""
 
 
 def create_inspector_job(
@@ -254,8 +313,8 @@ def create_inspector_job(
     timestamp = int(time.time())
     job_name = f"{pod_name}-krayt-{timestamp}"
 
-    # Get environment variables and secrets from the target pod
-    env_vars, secret_volumes = get_pod_env_and_secrets(api, namespace, pod_name)
+    # Get environment variables and secret volumes from the target pod
+    env_vars, secret_volumes = get_env_vars_and_secret_volumes(api, namespace)
 
     # Add secret volumes to our volumes list
     volumes.extend(secret_volumes)
@@ -286,6 +345,89 @@ def create_inspector_job(
         if hasattr(v, "persistent_volume_claim") and v.persistent_volume_claim:
             pvc_info.append(f"{v.name}:{v.persistent_volume_claim.claim_name}")
 
+    init_scripts = get_init_scripts()
+    
+    # Build the command script
+    command_parts = []
+    
+    # Configure apk proxy settings BEFORE any package installation
+    command_parts.extend([
+        "# Configure apk proxy settings",
+        "mkdir -p /etc/apk",
+        "cat > /etc/apk/repositories << 'EOF'",
+        "https://dl-cdn.alpinelinux.org/alpine/latest-stable/main",
+        "https://dl-cdn.alpinelinux.org/alpine/latest-stable/community",
+        "EOF",
+        "",
+        "if [ ! -z \"$HTTP_PROXY\" ]; then",
+        "  echo \"Setting up apk proxy configuration...\"",
+        "  mkdir -p /etc/apk/",
+        "  cat > /etc/apk/repositories << EOF",
+        "#/media/cdrom/apks",
+        "http://dl-cdn.alpinelinux.org/alpine/latest-stable/main",
+        "http://dl-cdn.alpinelinux.org/alpine/latest-stable/community",
+        "",
+        "# Configure proxy",
+        "proxy=$HTTP_PROXY",
+        "EOF",
+        "fi",
+        ""
+    ])
+    
+    # Add init scripts if present
+    if init_scripts:
+        command_parts.extend([
+            "# Write and run init scripts",
+            "mkdir -p /tmp/init.d",
+            "cat > /tmp/init.sh << 'EOFSCRIPT'",
+            init_scripts,
+            "EOFSCRIPT",
+            "",
+            "# Make init script executable and run it",
+            "chmod +x /tmp/init.sh",
+            "/tmp/init.sh 2>&1 | tee /tmp/init.log",
+            "echo 'Init script log available at /tmp/init.log'",
+            ""
+        ])
+    
+    # Add base installation commands AFTER proxy configuration
+    command_parts.extend([
+        "# Install basic tools first",
+        "apk update",
+        "apk add curl",
+        "",
+        "# Install additional tools",
+        "apk add ripgrep exa ncdu dust file hexyl jq yq bat fd fzf htop bottom difftastic mtr bind-tools aws-cli sqlite sqlite-dev sqlite-libs",
+        "",
+        "# Create .ashrc with MOTD",
+        "cat > /root/.ashrc << 'EOF'",
+        "# Display MOTD on login",
+        "[ -f /etc/motd ] && cat /etc/motd",
+        "EOF",
+        "",
+        "# Set up shell environment",
+        "export EDITOR=vi",
+        "export PAGER=less",
+        "",
+        "# Set up environment to always source our RC file",
+        "echo 'export ENV=/root/.ashrc' > /etc/profile",
+        "echo 'export ENV=/root/.ashrc' > /etc/environment",
+        "",
+        "# Make RC file available to all shells",
+        "mkdir -p /etc/profile.d",
+        "cp /root/.ashrc /etc/profile.d/motd.sh",
+        "ln -sf /root/.ashrc /root/.profile",
+        "ln -sf /root/.ashrc /root/.bashrc",
+        "ln -sf /root/.ashrc /root/.mkshrc",
+        "ln -sf /root/.ashrc /etc/shinit",
+        "",
+        "# Update MOTD",
+        get_motd_script(mount_info, pvc_info),
+        "",
+        "# Keep container running",
+        "tail -f /dev/null"
+    ])
+
     inspector_job = {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -293,11 +435,15 @@ def create_inspector_job(
             "name": job_name,
             "namespace": namespace,
             "labels": {"app": "krayt"},
+            "annotations": {
+                "pvcs": ",".join(pvc_info) if pvc_info else "none"
+            }
         },
         "spec": {
-            "ttlSecondsAfterFinished": 0,  # Delete immediately after completion
             "template": {
-                "metadata": {"labels": {"app": "krayt"}},
+                "metadata": {
+                    "labels": {"app": "krayt"}
+                },
                 "spec": {
                     "containers": [
                         {
@@ -306,170 +452,9 @@ def create_inspector_job(
                             "command": [
                                 "sh",
                                 "-c",
-                                """
-# Install basic tools first
-apk update
-apk add curl
-
-# Install lf (terminal file manager)
-curl -L https://github.com/gokcehan/lf/releases/download/r31/lf-linux-amd64.tar.gz | tar xzf - -C /usr/local/bin
-
-# Install the rest of the tools
-apk add ripgrep exa ncdu dust \
-    file hexyl jq yq bat fd fzf \
-    htop bottom difftastic \
-    mtr bind-tools \
-    aws-cli sqlite sqlite-dev sqlite-libs
-
-# Function to update MOTD
-update_motd() {
-    cat << EOF > /etc/motd
-====================================
-Krayt Dragon's Lair
-====================================
-"Inside every volume lies a pearl of wisdom waiting to be discovered."
-
-Mounted Volumes:
-$(echo "$MOUNTS" | tr ',' '\\n' | sed 's/^/- /')
-
-Persistent Volume Claims:
-$(echo "$PVCS" | tr ',' '\\n' | sed 's/^/- /')
-
-Mounted Secrets:
-$(for d in /mnt/secrets/*; do if [ -d "$d" ]; then echo "- $(basename $d)"; fi; done)
-
-Environment Variables:
-$(env | sort | sed 's/^/- /')
-
-Your Hunting Tools:
-File Navigation:
-- lf: Terminal file manager (run 'lf')
-- exa: Modern ls (run 'ls', 'll', or 'tree')
-- fd: Modern find (run 'fd pattern')
-
-Search & Analysis:
-- rg (ripgrep): Fast search (run 'rg pattern')
-- bat: Better cat with syntax highlighting
-- hexyl: Hex viewer (run 'hexyl file')
-- file: File type detection
-
-Disk Usage:
-- ncdu: Interactive disk usage analyzer
-- dust: Disk usage analyzer
-- du: Standard disk usage tool
-
-File Comparison:
-- difft: Modern diff tool (alias 'diff')
-
-System Monitoring:
-- btm: Modern system monitor (alias 'top')
-- htop: Interactive process viewer
-
-JSON/YAML Tools:
-- jq: JSON processor
-- yq: YAML processor
-
-Network Tools:
-- dig: DNS lookup
-- mtr: Network diagnostics
-
-Cloud & Database:
-- aws: AWS CLI
-- sqlite3: SQLite database tool
-
-Type 'tools-help' for detailed usage information
-====================================
-EOF
-}
-
-# Create helpful aliases and functions
-cat << 'EOF' > /root/.ashrc
-if [ "$PS1" ]; then
-    cat /etc/motd
-fi
-
-# Aliases for better file navigation
-alias ls='exa'
-alias ll='exa -l'
-alias la='exa -la'
-alias tree='exa --tree'
-alias find='fd'
-alias top='btm'
-alias diff='difft'
-alias cat='bat --paging=never'
-
-# Function to show detailed tool help
-tools-help() {
-    echo "Krayt Dragon Hunter's Guide:"
-    echo
-    echo "File Navigation:"
-    echo "  lf                   : Navigate with arrow keys, q to quit, h for help"
-    echo "  ls, ll, la          : List files (exa with different options)"
-    echo "  tree                : Show directory structure"
-    echo "  fd pattern          : Find files matching pattern"
-    echo
-    echo "Search & Analysis:"
-    echo "  rg pattern          : Search file contents"
-    echo "  bat file            : View file with syntax highlighting"
-    echo "  hexyl file          : View file in hex format"
-    echo "  file path           : Determine file type"
-    echo
-    echo "Disk Usage:"
-    echo "  ncdu                : Interactive disk usage analyzer (navigate with arrows)"
-    echo "  dust path           : Tree-based disk usage"
-    echo "  du -sh *            : Summarize disk usage"
-    echo
-    echo "File Comparison:"
-    echo "  diff file1 file2    : Compare files with syntax highlighting"
-    echo
-    echo "System Monitoring:"
-    echo "  top (btm)           : Modern system monitor"
-    echo "  htop                : Process viewer"
-    echo
-    echo "JSON/YAML Tools:"
-    echo "  jq . file.json      : Format and query JSON"
-    echo "  yq . file.yaml      : Format and query YAML"
-    echo
-    echo "Network Tools:"
-    echo "  dig domain          : DNS lookup"
-    echo "  mtr host            : Network diagnostics"
-    echo
-    echo "Cloud & Database:"
-    echo "  aws                 : AWS CLI tool"
-    echo "  sqlite3             : SQLite database tool"
-    echo
-    echo "Secrets:"
-    echo "  ls /mnt/secrets     : List mounted secrets"
-}
-
-# Set some helpful environment variables
-export EDITOR=vi
-export PAGER=less
-EOF
-
-# Set up environment to always source our RC file
-echo "export ENV=/root/.ashrc" > /etc/profile
-echo "export ENV=/root/.ashrc" > /etc/environment
-
-# Make RC file available to all shells
-cp /root/.ashrc /etc/profile.d/motd.sh
-ln -sf /root/.ashrc /root/.profile
-ln -sf /root/.ashrc /root/.bashrc
-ln -sf /root/.ashrc /root/.mkshrc
-ln -sf /root/.ashrc /etc/shinit
-
-# Create initial MOTD
-update_motd
-
-sleep 3600
-                                """,
+                                "\n".join(command_parts)
                             ],
-                            "env": env_vars
-                            + [
-                                {"name": "MOUNTS", "value": ",".join(mount_info)},
-                                {"name": "PVCS", "value": ",".join(pvc_info)},
-                                {"name": "ENV", "value": "/root/.ashrc"},
-                            ],
+                            "env": env_vars,
                             "volumeMounts": formatted_mounts,
                         }
                     ],
@@ -497,6 +482,37 @@ PROTECTED_NAMESPACES = {
     "istio-system",
     "linkerd",
 }
+
+
+def load_init_scripts():
+    """Load and execute initialization scripts from ~/.config/krayt/scripts/"""
+    init_dir = Path.home() / ".config" / "krayt" / "scripts"
+    if not init_dir.exists():
+        return
+
+    # Sort scripts to ensure consistent execution order
+    scripts = sorted(init_dir.glob("*.py"))
+    
+    for script in scripts:
+        try:
+            with open(script, 'r') as f:
+                exec(f.read(), globals())
+            logging.debug(f"Loaded init script: {script}")
+        except Exception as e:
+            logging.error(f"Failed to load init script {script}: {e}")
+
+
+def setup_environment():
+    """Set up the environment with proxy settings and other configurations"""
+    # Load environment variables for proxies
+    proxy_vars = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", 
+                  "http_proxy", "https_proxy", "no_proxy"]
+    
+    for var in proxy_vars:
+        if var in os.environ:
+            # Make both upper and lower case versions available
+            os.environ[var.upper()] = os.environ[var]
+            os.environ[var.lower()] = os.environ[var]
 
 
 def version_callback(value: bool):
@@ -569,12 +585,21 @@ def exec(
                 typer.echo("No inspector selected.")
                 raise typer.Exit(1)
 
-        # Execute the shell
-        typer.echo(f"Connecting to inspector {pod_namespace}/{pod_name}...")
-        os.execvp(
+        # Execute into the pod with a login shell to source .ashrc and show MOTD
+        exec_command = [
             "kubectl",
-            ["kubectl", "exec", "-it", "-n", pod_namespace, pod_name, "--", "sh", "-l"],
-        )
+            "-n",
+            pod_namespace,
+            "exec",
+            "-it",
+            pod_name,
+            "--",
+            "/bin/sh",
+            "-c",
+            "cat /etc/motd; exec /bin/ash -l"
+        ]
+        
+        os.execvp("kubectl", exec_command)
 
     except client.exceptions.ApiException as e:
         logging.error(f"Failed to list jobs: {e}")
@@ -702,5 +727,11 @@ def version():
     typer.echo(f"Version: {KRAYT_VERSION}")
 
 
-if __name__ == "__main__":
+def main():
+    setup_environment()
+    load_init_scripts()
     app()
+
+
+if __name__ == "__main__":
+    main()

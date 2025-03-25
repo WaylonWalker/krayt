@@ -65,6 +65,80 @@ Your inspector pod comes equipped with a full arsenal of tools:
 - **Network Tools**: `mtr`, `dig`
 - **Cloud & Database**: `aws-cli`, `sqlite3`
 
+## Customization
+
+### Init Scripts
+
+Krayt supports initialization scripts that run in the inspector pod before any packages are installed. These scripts are useful for:
+- Setting up proxy configurations
+- Installing additional tools
+- Configuring custom package repositories
+- Setting environment variables
+
+Place your scripts in `~/.config/krayt/init.d/` with a `.sh` extension. Scripts are executed in alphabetical order, so you can control the execution sequence using numerical prefixes.
+
+Example init scripts:
+
+1. Install additional tools (`~/.config/krayt/init.d/10_install_git.sh`):
+```bash
+#!/bin/sh
+echo "Installing additional tools..."
+
+# Install git for source control
+apk add git
+
+# Configure git
+git config --global init.defaultBranch main
+git config --global core.editor vi
+```
+
+2. Set up custom repositories (`~/.config/krayt/init.d/20_custom_repos.sh`):
+```bash
+#!/bin/sh
+echo "Adding custom package repositories..."
+
+# Add testing repository for newer packages
+echo "@testing http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories
+
+# Update package list
+apk update
+```
+
+### Proxy Configuration
+
+If your environment requires a proxy, you have two options:
+
+1. **Environment Variables** (Recommended):
+   ```bash
+   # Add to your shell's rc file (e.g., ~/.bashrc, ~/.zshrc)
+   export HTTP_PROXY="http://proxy.example.com:8080"
+   export HTTPS_PROXY="http://proxy.example.com:8080"
+   export NO_PROXY="localhost,127.0.0.1,.internal.example.com"
+   ```
+
+2. **Init Script** (`~/.config/krayt/init.d/00_proxy.sh`):
+   ```bash
+   #!/bin/sh
+   echo "Configuring proxy settings..."
+
+   # Set proxy for Alpine package manager
+   mkdir -p /etc/apk
+   cat > /etc/apk/repositories << EOF
+   http://dl-cdn.alpinelinux.org/alpine/latest-stable/main
+   http://dl-cdn.alpinelinux.org/alpine/latest-stable/community
+
+   # Configure proxy
+   proxy=http://proxy.example.com:8080
+   EOF
+
+   # Set proxy for other tools
+   export HTTP_PROXY="http://proxy.example.com:8080"
+   export HTTPS_PROXY="http://proxy.example.com:8080"
+   export NO_PROXY="localhost,127.0.0.1,.internal.example.com"
+   ```
+
+The proxy configuration will be applied before any packages are installed, ensuring that all package installations and network operations work correctly through your proxy.
+
 ## Quotes from the Field
 
 > "Inside every volume lies a pearl of wisdom waiting to be discovered."
