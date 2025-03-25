@@ -260,37 +260,45 @@ def get_init_scripts():
     """Get the contents of init scripts to be run in the pod"""
     init_dir = Path.home() / ".config" / "krayt" / "init.d"
     if not init_dir.exists():
+        logging.debug("No init.d directory found at %s", init_dir)
         return ""
 
-    # Sort scripts to ensure consistent execution order
     scripts = sorted(init_dir.glob("*.sh"))
     if not scripts:
+        logging.debug("No init scripts found in %s", init_dir)
         return ""
 
     # Create a combined script that will run all init scripts
-    init_script = "#!/bin/sh\n\n"
-    init_script += "echo 'Running initialization scripts...'\n\n"
+    init_script = "#!/bin/bash\n\n"
+    init_script += "exec 2>&1  # Redirect stderr to stdout for proper logging\n"
+    init_script += "set -e     # Exit on error\n\n"
+    init_script += "echo 'Running initialization scripts...' | tee /tmp/init.log\n\n"
+    init_script += "mkdir -p /tmp/init.d\n\n"  # Create directory once at the start
 
     for script in scripts:
         try:
             with open(script, "r") as f:
                 script_content = f.read()
-                if script_content:
-                    init_script += f"echo '=== Running {script.name} ==='\n"
-                    # Write each script to a separate file
-                    init_script += f"cat > /tmp/{script.name} << 'EOFSCRIPT'\n"
-                    init_script += script_content
-                    if not script_content.endswith("\n"):
-                        init_script += "\n"
-                    init_script += "EOFSCRIPT\n\n"
-                    # Make it executable and run it
-                    init_script += f"chmod +x /tmp/{script.name}\n"
-                    init_script += f"/tmp/{script.name} 2>&1 | tee -a /tmp/init.log\n"
-                    init_script += f"echo '=== Finished {script.name} ===\n\n'"
+                if not script_content.strip():
+                    logging.debug("Skipping empty script %s", script)
+                    continue
+
+                # Use a unique heredoc delimiter for each script to avoid nesting issues
+                delimiter = f"EOF_SCRIPT_{script.stem.upper()}"
+                
+                init_script += f"echo '=== Running {script.name} ===' | tee -a /tmp/init.log\n"
+                init_script += f"cat > /tmp/init.d/{script.name} << '{delimiter}'\n"
+                init_script += script_content
+                if not script_content.endswith("\n"):
+                    init_script += "\n"
+                init_script += f"{delimiter}\n"
+                init_script += f"chmod +x /tmp/init.d/{script.name}\n"
+                init_script += f"cd /tmp/init.d && ./{script.name} 2>&1 | tee -a /tmp/init.log || {{ echo \"Failed to run {script.name}\"; exit 1; }}\n"
+                init_script += f"echo '=== Finished {script.name} ===' | tee -a /tmp/init.log\n\n"
         except Exception as e:
             logging.error(f"Failed to load init script {script}: {e}")
 
-    init_script += "echo 'Initialization scripts complete.'\n"
+    init_script += "echo 'Initialization scripts complete.' | tee -a /tmp/init.log\n"
     return init_script
 
 
@@ -445,16 +453,17 @@ def create_inspector_job(
     if init_scripts:
         command_parts.extend(
             [
-                "# Write and run init scripts",
+                "# Set up init script environment",
                 "mkdir -p /tmp/init.d",
+                "",
+                "# Write and run init scripts",
                 "cat > /tmp/init.sh << 'EOFSCRIPT'",
                 init_scripts,
                 "EOFSCRIPT",
                 "",
                 "# Make init script executable and run it",
                 "chmod +x /tmp/init.sh",
-                "/tmp/init.sh 2>&1 | tee /tmp/init.log",
-                "echo 'Init script log available at /tmp/init.log'",
+                "bash /tmp/init.sh",
                 "",
             ]
         )
@@ -655,18 +664,16 @@ def exec(
                 typer.echo("No inspector selected.")
                 raise typer.Exit(1)
 
-        # Execute into the pod with a login shell to source .ashrc and show MOTD
         exec_command = [
             "kubectl",
-            "-n",
-            pod_namespace,
             "exec",
             "-it",
+            "-n",
+            pod_namespace,
             pod_name,
             "--",
-            "/bin/sh",
-            "-c",
-            "cat /etc/motd; exec /bin/ash -l",
+            "/bin/bash",
+            "-l",
         ]
 
         os.execvp("kubectl", exec_command)
