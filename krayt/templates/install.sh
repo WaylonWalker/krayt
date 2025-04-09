@@ -1,7 +1,7 @@
 {% if additional_packages %}
-detect_package_manager_and_install_command() {
+detect_package_manager_and_install() {
 	if [ $# -eq 0 ]; then
-		echo "Usage: detect_package_manager_and_install_command <package1> [package2] [...]"
+		echo "Usage: detect_package_manager_and_install <package1> [package2] [...]"
 		return 1
 	fi
 
@@ -34,19 +34,32 @@ detect_package_manager_and_install_command() {
 		return 2
 	fi
 
-	PACKAGES="$*"
+	echo "Using package manager: $PKG_MANAGER"
 
 	if [ -n "$UPDATE_CMD" ]; then
-		echo "$UPDATE_CMD
-        echo $INSTALL_CMD $PACKAGES"
-		$UPDATE_CMD
-		$INSTALL_CMD $PACKAGES
+		echo "Running package manager update..."
+		eval "$UPDATE_CMD"
+	fi
 
+	FAILED_PKGS=()
+
+	for pkg in "$@"; do
+		echo "Installing package: $pkg"
+		if ! eval "$INSTALL_CMD $pkg"; then
+			echo "⚠️ Warning: Failed to install package: $pkg"
+			FAILED_PKGS+=("$pkg")
+		fi
+	done
+
+	if [ ${#FAILED_PKGS[@]} -ne 0 ]; then
+		echo "⚠️ The following packages failed to install:"
+		for failed_pkg in "${FAILED_PKGS[@]}"; do
+			echo "  - $failed_pkg"
+		done
 	else
-		echo "$INSTALL_CMD $PACKAGES"
-		$INSTALL_CMD $PACKAGES
+		echo "✅ All requested packages installed successfully."
 	fi
 }
 
-detect_package_manager_and_install_command {% for package in additional_packages %}{{ package | trim }}{% if not loop.last %} {% endif %}{% endfor %}
+detect_package_manager_and_install {% for package in additional_packages %}{{ package | trim }}{% if not loop.last %} {% endif %}{% endfor %}
 {% endif %}

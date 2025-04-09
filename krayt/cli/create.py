@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import time
 import typer
-from typing import Any, Optional
+from typing import Any, List, Optional
 import yaml
 
 KRAYT_VERSION = "NIGHTLY"
@@ -324,6 +324,11 @@ def create_inspector_job(
     volumes: list,
     image: str = "alpine:latest",
     imagepullsecret: Optional[str] = None,
+    additional_packages: Optional[List[str]] = None,
+    pre_init_scripts: Optional[List[str]] = None,
+    post_init_scripts: Optional[List[str]] = None,
+    pre_init_hooks: Optional[List[str]] = None,
+    post_init_hooks: Optional[List[str]] = None,
 ):
     """Create a Krayt inspector job with the given mounts"""
     timestamp = int(time.time())
