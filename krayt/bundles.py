@@ -11,7 +11,7 @@ basics = [
     "coreutils",
 ]
 pretty = [
-        *basics
+    *basics,
     "starship",
     "atuin",
     "bash",
@@ -21,7 +21,7 @@ pretty = [
     "eza",
 ]
 networking = [
-        *basics
+    *basics,
     "mtr",
     "bind-tools",
     "aws-cli",
@@ -34,7 +34,7 @@ networking = [
 ]
 
 database = [
-        *basics
+    *basics,
     "sqlite",
     "sqlite-dev",
     "sqlite-libs",
@@ -46,7 +46,7 @@ database = [
 ]
 
 storage = [
-        *basics
+    *basics,
     "ncdu",
     "dust",
     "file",
@@ -58,7 +58,7 @@ storage = [
 ]
 
 search = [
-        *basics
+    *basics,
     "ripgrep",
     "fd",
     "fzf",
@@ -66,7 +66,7 @@ search = [
 ]
 
 monitoring = [
-        *basics
+    *basics,
     "htop",
     "bottom",
     "mtr",

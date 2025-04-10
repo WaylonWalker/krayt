@@ -28,7 +28,8 @@ classifiers = [
 dependencies = [
      "typer",
      "kubernetes",
-     "InquirerPy",
+     "inquirerPy",
+     "inquirer",
      "jinja2",
      "iterfzf",
      "pydantic",

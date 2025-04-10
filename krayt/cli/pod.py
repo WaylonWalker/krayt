@@ -1,15 +1,12 @@
-from iterfzf import iterfzf
+import iterfzf
 from krayt.templates import env
 from kubernetes import client, config
 import logging
 import os
-from pathlib import Path
 import time
 import typer
 from typing import Any, List, Optional
 import yaml
-
-KRAYT_VERSION = "NIGHTLY"
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -92,7 +89,15 @@ def fuzzy_select(items):
 
     # Use fzf for selection
     try:
-        selected = iterfzf(formatted_items)
+        # selected = inquirer.fuzzy(
+        #     message="Select a pod to clone:", choices=formatted_items
+        # ).execute()
+
+        selected = iterfzf.iterfzf(
+            formatted_items,
+            prompt="Select a pod to clone:",
+            preview='''kubectl describe pod "$(echo {} | awk -F'[(|)]' '{gsub(/\x1b\[[0-9;]*m/, "", $1); print $1}' | xargs)" -n "$(echo {} | awk -F'[(|)]' '{gsub(/\x1b\[[0-9;]*m/, "", $2); print $2}' | xargs)"''',
+        )
         if not selected:
             return None, None
 
@@ -239,83 +244,6 @@ def get_env_vars_and_secret_volumes(api, namespace: str):
     return env_vars, volumes
 
 
-def get_init_scripts():
-    """Get the contents of init scripts to be run in the pod"""
-    init_dir = Path.home() / ".config" / "krayt" / "init.d"
-    if not init_dir.exists():
-        logging.debug("No init.d directory found at %s", init_dir)
-        return ""
-
-    scripts = sorted(init_dir.glob("*.sh"))
-    if not scripts:
-        logging.debug("No init scripts found in %s", init_dir)
-        return ""
-
-    # Create a combined script that will run all init scripts
-    init_script = "#!/bin/bash\n\n"
-    init_script += "exec 2>&1  # Redirect stderr to stdout for proper logging\n"
-    init_script += "set -e     # Exit on error\n\n"
-    init_script += "echo 'Running initialization scripts...' | tee /tmp/init.log\n\n"
-    init_script += "mkdir -p /tmp/init.d\n\n"  # Create directory once at the start
-
-    for script in scripts:
-        try:
-            with open(script, "r") as f:
-                script_content = f.read()
-                if not script_content.strip():
-                    logging.debug("Skipping empty script %s", script)
-                    continue
-
-                # Use a unique heredoc delimiter for each script to avoid nesting issues
-                delimiter = f"EOF_SCRIPT_{script.stem.upper()}"
-
-                init_script += (
-                    f"echo '=== Running {script.name} ===' | tee -a /tmp/init.log\n"
-                )
-                init_script += f"cat > /tmp/init.d/{script.name} << '{delimiter}'\n"
-                init_script += script_content
-                if not script_content.endswith("\n"):
-                    init_script += "\n"
-                init_script += f"{delimiter}\n"
-                init_script += f"chmod +x /tmp/init.d/{script.name}\n"
-                init_script += f'cd /tmp/init.d && ./{script.name} 2>&1 | tee -a /tmp/init.log || {{ echo "Failed to run {script.name}"; exit 1; }}\n'
-                init_script += (
-                    f"echo '=== Finished {script.name} ===' | tee -a /tmp/init.log\n\n"
-                )
-        except Exception as e:
-            logging.error(f"Failed to load init script {script}: {e}")
-
-    init_script += "echo 'Initialization scripts complete.' | tee -a /tmp/init.log\n"
-    return init_script
-
-
-def get_motd_script(mount_info, pvc_info):
-    """Generate the MOTD script with proper escaping"""
-    return f"""
-# Create MOTD
-cat << EOF > /etc/motd
-====================================
-Krayt Dragon's Lair
-A safe haven for volume inspection
-====================================
-
-"Inside every volume lies a pearl of wisdom waiting to be discovered."
-
-Mounted Volumes:
-$(echo "{",".join(mount_info)}" | tr ',' '\\n' | sed 's/^/- /')
-
-Persistent Volume Claims:
-$(echo "{",".join(pvc_info)}" | tr ',' '\\n' | sed 's/^/- /')
-
-Mounted Secrets:
-$(for d in /mnt/secrets/*; do if [ -d "$d" ]; then echo "- $(basename $d)"; fi; done)
-
-Init Script Status:
-$(if [ -f /tmp/init.log ]; then echo "View initialization log at /tmp/init.log"; fi)
-EOF
-"""
-
-
 def create_inspector_job(
     api,
     namespace: str,
@@ -418,6 +346,7 @@ def create_inspector_job(
             "annotations": {"pvcs": ",".join(pvc_info) if pvc_info else "none"},
         },
         "spec": {
+            "ttlSecondsAfterFinished": 600,
             "template": {
                 "metadata": {"labels": {"app": "krayt"}},
                 "spec": {
@@ -457,24 +386,6 @@ PROTECTED_NAMESPACES = {
     "istio-system",
     "linkerd",
 }
-
-
-def load_init_scripts():
-    """Load and execute initialization scripts from ~/.config/krayt/scripts/"""
-    init_dir = Path.home() / ".config" / "krayt" / "scripts"
-    if not init_dir.exists():
-        return
-
-    # Sort scripts to ensure consistent execution order
-    scripts = sorted(init_dir.glob("*.py"))
-
-    for script in scripts:
-        try:
-            with open(script, "r") as f:
-                exec(f.read(), globals())
-            logging.debug(f"Loaded init script: {script}")
-        except Exception as e:
-            logging.error(f"Failed to load init script {script}: {e}")
 
 
 def setup_environment():
@@ -657,7 +568,15 @@ def clean(
 def create(
     namespace: Optional[str] = typer.Option(
         None,
+        "--namespace",
+        "-n",
         help="Kubernetes namespace. If not specified, will search for pods across all namespaces.",
+    ),
+    clone: Optional[str] = typer.Option(
+        None,
+        "--clone",
+        "-c",
+        help="Clone an existing pod",
     ),
     image: str = typer.Option(
         "alpine:latest",
@@ -670,6 +589,39 @@ def create(
         "--imagepullsecret",
         help="Name of the image pull secret to use for pulling private images",
     ),
+    additional_packages: Optional[List[str]] = typer.Option(
+        None,
+        "--additional-packages",
+        "-ap",
+        help="additional packages to install in the inspector pod",
+    ),
+    additional_package_bundles: Optional[List[str]] = typer.Option(
+        None,
+        "--additional-package-bundles",
+        "-ab",
+        help="additional packages to install in the inspector pod",
+    ),
+    pre_init_scripts: Optional[List[str]] = typer.Option(
+        None,
+        "--pre-init-scripts",
+        help="additional scripts to execute at the end of container initialization",
+    ),
+    post_init_scripts: Optional[List[str]] = typer.Option(
+        None,
+        "--post-init-scripts",
+        "--init-scripts",
+        help="additional scripts to execute at the start of container initialization",
+    ),
+    pre_init_hooks: Optional[List[str]] = typer.Option(
+        None,
+        "--pre-init-hooks",
+        help="additional hooks to execute at the end of container initialization",
+    ),
+    post_init_hooks: Optional[List[str]] = typer.Option(
+        None,
+        "--post-init-hooks",
+        help="additional hooks to execute at the start of container initialization",
+    ),
 ):
     """
     Krack open a Krayt dragon! Create an inspector pod to explore what's inside your volumes.
@@ -677,15 +629,36 @@ def create(
     The inspector will be created in the same namespace as the selected pod.
     """
     # For create, we want to list all pods, not just Krayt pods
+    selected_namespace = None
+    selected_pod = None
+    typer.echo(namespace)
+    typer.echo(clone)
+
+    if namespace is None and clone is not None and "/" in clone:
+        selected_namespace, selected_pod = clone.split("/", 1)
+    elif namespace is not None and clone is not None:
+        selected_namespace = namespace
+        selected_pod = clone
+
     pods = get_pods(namespace, label_selector=None)
     if not pods:
         typer.echo("No pods found.")
         raise typer.Exit(1)
 
-    selected_pod, selected_namespace = fuzzy_select(pods)
-    if not selected_pod:
-        typer.echo("No pod selected.")
-        raise typer.Exit(1)
+    if selected_pod not in (p[0] for p in pods) or selected_pod is None:
+        if selected_pod is not None:
+            pods = [p for p in pods if selected_pod in p[0]]
+        if len(pods) == 1:
+            selected_pod, selected_namespace = pods[0]
+        else:
+            selected_pod, selected_namespace = fuzzy_select(pods)
+        if not selected_pod:
+            typer.echo("No pod selected.")
+            raise typer.Exit(1)
+
+    typer.echo(f"Selected pod exists: {selected_pod in (p[0] for p in pods)}")
+    typer.echo(f"Selected pod: {selected_pod} ({selected_namespace})")
+    raise typer.Exit(1)
 
     pod_spec = get_pod_spec(selected_pod, selected_namespace)
     volume_mounts, volumes = get_pod_volumes_and_mounts(pod_spec)
@@ -758,9 +731,19 @@ def logs(
         raise typer.Exit(1)
 
 
+@app.command("list")
+def list_pods():
+    pods = get_pods()
+    if not pods:
+        typer.echo("No pods found.")
+        raise typer.Exit(1)
+
+    for pod, namespace in pods:
+        typer.echo(f"{pod} ({namespace})")
+
+
 def main():
     setup_environment()
-    load_init_scripts()
     app()
 
 

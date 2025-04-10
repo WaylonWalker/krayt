@@ -40,6 +40,7 @@ class Package(BaseModel):
             "uv",
             "i",
             "curlsh",
+            "curlbash",
             "brew",
             "cargo",
             "pipx",
@@ -49,8 +50,10 @@ class Package(BaseModel):
         ],
         BeforeValidator(validate_kind),
     ] = "system"
-    dependencies: Optional[List[str]] = None
     value: str
+    dependencies: Optional[List["Package"]] = None
+    pre_install_hook: Optional[str] = None
+    post_install_hook: Optional[str] = None
 
     @classmethod
     def from_raw(cls, raw: str) -> "Package":
@@ -67,52 +70,37 @@ class Package(BaseModel):
     def validate_dependencies(self) -> Self:
         if self.dependencies:
             return self
-        else:
-            if self.kind == "system":
-                return self
-            dependencies = []
-            if self.kind in ["uv", "i", "installer", "curlbash", "curlsh", "gh"]:
-                dependencies.extend(
-                    [
-                        Package.from_raw("curl"),
-                    ]
-                )
-            if self.kind == "brew":
-                dependencies.extend(
-                    [
-                        Package.from_raw("brew"),
-                        Package.from_raw("git"),
-                    ]
-                )
-            if self.kind == "cargo":
-                dependencies.extend(
-                    [
-                        Package.from_raw("cargo"),
-                    ]
-                )
-            if self.kind == "pipx":
-                dependencies.extend(
-                    [
-                        Package.from_raw("pipx"),
-                    ]
-                )
-            if self.kind == "npm":
-                dependencies.extend(
-                    [
-                        Package.from_raw("npm"),
-                    ]
-                )
-            if self.kind == "go":
-                dependencies.extend(
-                    [
-                        Package.from_raw("go"),
-                    ]
-                )
-            self.dependencies = dependencies
-            return self
+        dependencies = []
 
-    def __str__(self):
-        return f"{self.kind}:{self.value}" if self.kind != "system" else self.value
+        if self.kind in ["uv", "i", "installer", "curlbash", "curlsh", "gh"]:
+            dependencies.append(Package.from_raw("curl"))
+        if self.kind == "brew":
+            dependencies.append(Package.from_raw("git"))
+            dependencies.append(Package.from_raw("curl"))
+            self.pre_install_hook = "NONINTERACTIVE=1"
+            self.post_install_hook = """
+# Setup Homebrew PATH
+if [ -f /home/linuxbrew/.linuxbrew/bin/brew ]; then
+    eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+elif [ -f /opt/homebrew/bin/brew ]; then
+    eval "$(/opt/homebrew/.linuxbrew/bin/brew shellenv)"
+elif [ -f /usr/local/bin/brew ]; then
+    eval "$(/usr/local/bin/brew shellenv)"
+else
+    echo "⚠️ Brew installed but binary location unknown."
+fi
+"""
+        if self.kind == "cargo":
+            dependencies.append(Package.from_raw("cargo"))
+        if self.kind == "pipx":
+            dependencies.append(Package.from_raw("pipx"))
+        if self.kind == "npm":
+            dependencies.append(Package.from_raw("npm"))
+        if self.kind == "go":
+            dependencies.append(Package.from_raw("go"))
+
+        self.dependencies = dependencies
+        return self
 
     def is_system(self) -> bool:
         return self.kind == "system"
@@ -121,28 +109,35 @@ class Package(BaseModel):
         """
         Generate the bash install command snippet for this package.
         """
+        cmd = ""
         if self.kind == "system":
-            return f"detect_package_manager_and_install {self.value}"
+            cmd = f"detect_package_manager_and_install {self.value}"
         elif self.kind == "uv":
-            return f"uv tool install {self.value}"
+            cmd = f"uv tool install {self.value}"
         elif self.kind in ["i", "installer", "gh"]:
-            return f"curl -fsSL https://i.jpillora.com/{self.value} | sh"
+            cmd = f"curl -fsSL https://i.jpillora.com/{self.value} | sh"
         elif self.kind == "curlsh":
-            return f"curl -fsSL {self.value} | sh"
+            cmd = f"curl -fsSL {self.value} | sh"
         elif self.kind == "curlbash":
-            return f"curl -fsSL {self.value} | bash"
+            cmd = f"curl -fsSL {self.value} | bash"
         elif self.kind == "brew":
-            return f"brew install {self.value}"
+            cmd = "curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | bash"
         elif self.kind == "cargo":
-            return f"cargo install {self.value}"
+            cmd = f"cargo install {self.value}"
         elif self.kind == "pipx":
-            return f"pipx install {self.value}"
+            cmd = f"pipx install {self.value}"
         elif self.kind == "npm":
-            return f"npm install -g {self.value}"
+            cmd = f"npm install -g {self.value}"
         elif self.kind == "go":
-            return f"go install {self.value}@latest"
+            cmd = f"go install {self.value}@latest"
         else:
             raise ValueError(f"Unknown install method for kind={self.kind}")
+
+        # Add pre-install hook if necessary
+        if self.pre_install_hook:
+            return f"{self.pre_install_hook} {cmd}"
+        else:
+            return cmd
 
 
 if __name__ == "__main__":
@@ -163,4 +158,11 @@ if __name__ == "__main__":
                 [dependency.install_command() for dependency in package.dependencies]
             )
     installs = [package.install_command() for package in packages]
-    print("\n".join(install for install in unique_everseen([*dependencies, *installs])))
+    post_hooks = []
+    for package in packages:
+        if package.post_install_hook:
+            post_hooks.append(package.post_install_hook.strip())
+
+    # Final full script
+    full_script = list(unique_everseen([*dependencies, *installs, *post_hooks]))
+    print("\n".join(full_script))
