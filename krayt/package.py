@@ -11,7 +11,6 @@ SUPPORTED_KINDS = {
     "i",
     "curlbash",
     "curlsh",
-    "brew",
     "cargo",
     "pipx",
     "npm",
@@ -31,7 +30,7 @@ def validate_kind(v):
 class Package(BaseModel):
     """
     Represents a package to be installed, either via system package manager
-    or an alternative installer like uv, installer.sh, brew, etc.
+    or an alternative installer like uv, installer.sh, etc.
     """
 
     kind: Annotated[
@@ -41,7 +40,6 @@ class Package(BaseModel):
             "i",
             "curlsh",
             "curlbash",
-            "brew",
             "cargo",
             "pipx",
             "npm",
@@ -74,22 +72,6 @@ class Package(BaseModel):
 
         if self.kind in ["uv", "i", "installer", "curlbash", "curlsh", "gh"]:
             dependencies.append(Package.from_raw("curl"))
-        if self.kind == "brew":
-            dependencies.append(Package.from_raw("git"))
-            dependencies.append(Package.from_raw("curl"))
-            self.pre_install_hook = "NONINTERACTIVE=1"
-            self.post_install_hook = """
-# Setup Homebrew PATH
-if [ -f /home/linuxbrew/.linuxbrew/bin/brew ]; then
-    eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-elif [ -f /opt/homebrew/bin/brew ]; then
-    eval "$(/opt/homebrew/.linuxbrew/bin/brew shellenv)"
-elif [ -f /usr/local/bin/brew ]; then
-    eval "$(/usr/local/bin/brew shellenv)"
-else
-    echo "⚠️ Brew installed but binary location unknown."
-fi
-"""
         if self.kind == "cargo":
             dependencies.append(Package.from_raw("cargo"))
         if self.kind == "pipx":
@@ -120,8 +102,6 @@ fi
             cmd = f"curl -fsSL {self.value} | sh"
         elif self.kind == "curlbash":
             cmd = f"curl -fsSL {self.value} | bash"
-        elif self.kind == "brew":
-            cmd = "curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | bash"
         elif self.kind == "cargo":
             cmd = f"cargo install {self.value}"
         elif self.kind == "pipx":
@@ -147,7 +127,6 @@ if __name__ == "__main__":
         "uv:copier",
         "i:sharkdp/fd",
         "curlsh:https://example.com/install.sh",
-        "brew:bat",
     ]
 
     packages = [Package.from_raw(raw) for raw in raw_inputs]
