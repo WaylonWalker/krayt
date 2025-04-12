@@ -2,18 +2,7 @@ from krayt.templates import env
 import typer
 from typing import List, Optional
 
-# app = typer.Typer()
-app = typer.Typer(
-    context_settings={
-        "auto_envvar_prefix": "KRAYT",
-        "help_option_names": ["-h", "--help"],
-        "show_default": True,
-        "allow_interspersed_args": True,
-        "ignore_unknown_options": False,
-        "max_content_width": None,
-        "suggest_command": True,
-    }
-)
+app = typer.Typer()
 
 
 @app.command()
@@ -103,6 +92,8 @@ def motd(
     template_name = "motd.sh"
     template = env.get_template(template_name)
     rendered = template.render(
-        volumes=volumes, pvcs=pvcs, additional_packages=additional_packages
+        volumes=volumes,
+        pvcs=pvcs,
+        additional_packages=additional_packages,
     )
     print(rendered)

@@ -296,31 +296,6 @@ def create_inspector_job(
 
     template_name = "base.sh"
     template = env.get_template(template_name)
-    additional_packages = [
-        "ripgrep",
-        "exa",
-        "ncdu",
-        "dust",
-        "file",
-        "hexyl",
-        "jq",
-        "yq",
-        "bat",
-        "fd",
-        "fzf",
-        "htop",
-        "bottom",
-        "difftastic",
-        "mtr",
-        "bind-tools",
-        "aws-cli",
-        "sqlite",
-        "sqlite-dev",
-        "sqlite-libs",
-        "bash",
-        "neovim",
-        "starship",
-    ]
     pvcs = None
     pre_init_scripts = None
     post_init_scripts = None
@@ -631,8 +606,6 @@ def create(
     # For create, we want to list all pods, not just Krayt pods
     selected_namespace = None
     selected_pod = None
-    typer.echo(namespace)
-    typer.echo(clone)
 
     if namespace is None and clone is not None and "/" in clone:
         selected_namespace, selected_pod = clone.split("/", 1)
@@ -656,9 +629,8 @@ def create(
             typer.echo("No pod selected.")
             raise typer.Exit(1)
 
-    typer.echo(f"Selected pod exists: {selected_pod in (p[0] for p in pods)}")
-    typer.echo(f"Selected pod: {selected_pod} ({selected_namespace})")
-    raise typer.Exit(1)
+    # typer.echo(f"Selected pod exists: {selected_pod in (p[0] for p in pods)}")
+    # typer.echo(f"Selected pod: {selected_pod} ({selected_namespace})")
 
     pod_spec = get_pod_spec(selected_pod, selected_namespace)
     volume_mounts, volumes = get_pod_volumes_and_mounts(pod_spec)
@@ -671,6 +643,11 @@ def create(
         volumes,
         image=image,
         imagepullsecret=imagepullsecret,
+        additional_packages=additional_packages,
+        pre_init_scripts=pre_init_scripts,
+        post_init_scripts=post_init_scripts,
+        pre_init_hooks=pre_init_hooks,
+        post_init_hooks=post_init_hooks,
     )
 
     # Output the job manifest
