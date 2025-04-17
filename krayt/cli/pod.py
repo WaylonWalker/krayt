@@ -7,6 +7,8 @@ import time
 import typer
 from typing import Any, List, Optional
 import yaml
+from krayt.__about__ import __version__
+
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -384,7 +386,7 @@ def setup_environment():
 
 def version_callback(value: bool):
     if value:
-        typer.echo(f"Version: {KRAYT_VERSION}")
+        typer.echo(f"Version: {__version__}")
         raise typer.Exit()
 
 
@@ -698,7 +700,7 @@ def create(
 @app.command()
 def version():
     """Show the version of Krayt."""
-    typer.echo(f"Version: {KRAYT_VERSION}")
+    typer.echo(f"Version: {__version__}")
 
 
 @app.command()

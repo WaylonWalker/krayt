@@ -69,9 +69,8 @@ def install(
     ),
 ):
     template_name = "install.sh"
-    breakpoint()
     template = env.get_template(template_name)
-    rendered = template.render(packages=packages)
+    rendered = template.render(additional_packages=additional_packages)
     print(rendered)
 
 
