@@ -1,0 +1,21 @@
+name: Release Krayt
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "krayt/**"
+      - "pyproject.toml"
+env:
+  HATCH_INDEX_USER: __token__
+  HATCH_INDEX_AUTH: ${{ secrets.pypi_password }}
+jobs:
+  release-markata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: waylonwalker/hatch-action@v4
+        with:
+          before-command: "lint-format"
+        env:
+          # required for gh release
+          GH_TOKEN: ${{ github.token }}
