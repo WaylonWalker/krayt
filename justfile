@@ -70,3 +70,27 @@ preview-release-notes:
     ./scripts/get_release_notes.py "$VERSION" | less -R
 
 release: create-release
+
+build-pyapp:
+    export PYAPP_PROJECT_NAME=krayt
+    export PYAPP_PROJECT_VERSION=`hatch version`
+    export PYAPP_DISTRIBUTION_SOURCE=~/git/krayt/dist/krayt-${PYAPP_PROJECT_VERSION}.tar.gz
+    export PYAPP_DISTRIBUTION_EMBED=true
+
+
+    echo "linting"
+    hatch run lint-format
+
+    echo "Building pyapp"
+    hatch build
+
+    echo "Uploading pyapp"
+    hatch publish
+
+    cd ~/git/pyapp
+    cargo build --release --quiet
+
+
+    echo "Done"
+
+
