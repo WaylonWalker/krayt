@@ -1,38 +1,14 @@
-#!/usr/bin/env -S uv run --quiet --script
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "typer",
-#     "kubernetes",
-#     "iterfzf"
-# ]
-# ///
-"""
-Krayt - The Kubernetes Volume Inspector
-
-Like cracking open a Krayt dragon pearl, this tool helps you inspect what's inside your Kubernetes volumes.
-Hunt down storage issues and explore your persistent data like a true Tatooine dragon hunter.
-
-Features:
-- Create inspector pods with all the tools you need
-- Access volumes and device mounts from any pod
-- Fuzzy search across all namespaces
-- Built-in tools for file exploration and analysis
-- Automatic cleanup of inspector pods
-
-May the Force be with your volumes!
-"""
-
-from iterfzf import iterfzf
+import iterfzf
+from krayt.templates import env
 from kubernetes import client, config
 import logging
 import os
 import time
 import typer
-from typing import Any, Optional
+from typing import Any, List, Optional
 import yaml
+from krayt.__about__ import __version__
 
-KRAYT_VERSION = "NIGHTLY"
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -106,47 +82,65 @@ def fuzzy_select(items):
     if not items:
         return None, None
 
-    # Format items as "namespace/name" for display
-    formatted_items = [f"{ns}/{name}" for name, ns in items]
-    logging.debug(f"Found {len(formatted_items)} pods")
+    # If there's only one item, return it without prompting
+    if len(items) == 1:
+        return items[0]
 
+    # Format items for display
+    formatted_items = [f"{name} ({namespace})" for name, namespace in items]
+
+    # Use fzf for selection
     try:
-        # Use iterfzf for selection
-        selected = iterfzf(formatted_items)
+        # selected = inquirer.fuzzy(
+        #     message="Select a pod to clone:", choices=formatted_items
+        # ).execute()
 
-        if selected:
-            namespace, name = selected.split("/")
-            logging.debug(f"Selected pod {name} in namespace {namespace}")
-            return name, namespace
-        else:
-            logging.debug("No selection made")
+        selected = iterfzf.iterfzf(
+            formatted_items,
+            prompt="Select a pod to clone:",
+            preview='''kubectl describe pod "$(echo {} | awk -F'[(|)]' '{gsub(/\x1b\[[0-9;]*m/, "", $1); print $1}' | xargs)" -n "$(echo {} | awk -F'[(|)]' '{gsub(/\x1b\[[0-9;]*m/, "", $2); print $2}' | xargs)"''',
+        )
+        if not selected:
             return None, None
 
+        # Parse selection back into name and namespace
+        # Example: "pod-name (namespace)" -> ("pod-name", "namespace")
+        name = selected.split(" (")[0]
+        namespace = selected.split(" (")[1][:-1]
+        return name, namespace
+
     except Exception as e:
-        logging.error(f"Error during selection: {e}", exc_info=True)
-        typer.echo(f"Error during selection: {e}", err=True)
-        raise typer.Exit(1)
+        typer.echo(f"Error during selection: {e}")
+        return None, None
 
 
-def get_pods(namespace=None):
+def get_pods(
+    namespace=None,
+    label_selector: str = "app=krayt",
+):
     """Get list of pods in the specified namespace or all namespaces"""
-    config.load_kube_config()
-    v1 = client.CoreV1Api()
-
     try:
+        config.load_kube_config()
+        api = client.CoreV1Api()
         if namespace:
-            logging.debug(f"Listing pods in namespace {namespace}")
-            pod_list = v1.list_namespaced_pod(namespace=namespace)
+            pods = api.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=label_selector,
+            )
         else:
-            logging.debug("Listing pods in all namespaces")
-            pod_list = v1.list_pod_for_all_namespaces()
+            pods = api.list_pod_for_all_namespaces(
+                label_selector=label_selector,
+            )
 
-        pods = [(pod.metadata.name, pod.metadata.namespace) for pod in pod_list.items]
-        logging.debug(f"Found {len(pods)} pods")
-        return pods
-    except client.exceptions.ApiException as e:
-        logging.error(f"Error listing pods: {e}")
-        typer.echo(f"Error listing pods: {e}", err=True)
+        # Convert to list of (name, namespace) tuples
+        pod_list = []
+        for pod in pods.items:
+            if pod.metadata.namespace not in PROTECTED_NAMESPACES:
+                pod_list.append((pod.metadata.name, pod.metadata.namespace))
+        return pod_list
+
+    except client.rest.ApiException as e:
+        typer.echo(f"Error listing pods: {e}")
         raise typer.Exit(1)
 
 
@@ -205,57 +199,73 @@ def get_pod_volumes_and_mounts(pod_spec):
     return volume_mounts, volumes
 
 
-def get_pod_env_and_secrets(api, namespace, pod_name):
-    pod = api.read_namespaced_pod(pod_name, namespace)
-
-    # Get environment variables from the pod
+def get_env_vars_and_secret_volumes(api, namespace: str):
+    """Get environment variables and secret volumes for the inspector pod"""
     env_vars = []
-    for container in pod.spec.containers:
-        if container.env:
-            for env in container.env:
-                env_dict = {"name": env.name}
-                if env.value:
-                    env_dict["value"] = env.value
-                elif env.value_from:
-                    if env.value_from.config_map_key_ref:
-                        env_dict["valueFrom"] = {
-                            "configMapKeyRef": {
-                                "name": env.value_from.config_map_key_ref.name,
-                                "key": env.value_from.config_map_key_ref.key,
-                            }
-                        }
-                    elif env.value_from.secret_key_ref:
-                        env_dict["valueFrom"] = {
-                            "secretKeyRef": {
-                                "name": env.value_from.secret_key_ref.name,
-                                "key": env.value_from.secret_key_ref.key,
-                            }
-                        }
-                    elif env.value_from.field_ref:
-                        env_dict["valueFrom"] = {
-                            "fieldRef": {
-                                "fieldPath": env.value_from.field_ref.field_path
-                            }
-                        }
-                env_vars.append(env_dict)
+    volumes = []
 
-    # Get all volume mounts that are secrets
-    secret_volumes = []
-    if pod.spec.volumes:
-        secret_volumes = [v for v in pod.spec.volumes if v.secret]
+    # Add proxy environment variables if they exist in the host environment
+    proxy_vars = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    ]
 
-    return env_vars, secret_volumes
+    for var in proxy_vars:
+        if var in os.environ:
+            env_vars.append({"name": var, "value": os.environ[var]})
+
+    # Look for secret volumes in the namespace
+    try:
+        secrets = api.list_namespaced_secret(namespace)
+        for secret in secrets.items:
+            # Skip service account tokens and other system secrets
+            if secret.type != "Opaque" or secret.metadata.name.startswith(
+                "default-token-"
+            ):
+                continue
+
+            # Mount each secret as a volume
+            volume_name = f"secret-{secret.metadata.name}"
+            volumes.append(
+                client.V1Volume(
+                    name=volume_name,
+                    secret=client.V1SecretVolumeSource(
+                        secret_name=secret.metadata.name
+                    ),
+                )
+            )
+
+    except client.exceptions.ApiException as e:
+        if e.status != 404:  # Ignore if no secrets found
+            logging.warning(f"Failed to list secrets in namespace {namespace}: {e}")
+
+    return env_vars, volumes
 
 
 def create_inspector_job(
-    api, namespace: str, pod_name: str, volume_mounts: list, volumes: list
+    api,
+    namespace: str,
+    pod_name: str,
+    volume_mounts: list,
+    volumes: list,
+    image: str = "alpine:latest",
+    imagepullsecret: Optional[str] = None,
+    additional_packages: Optional[List[str]] = None,
+    pre_init_scripts: Optional[List[str]] = None,
+    post_init_scripts: Optional[List[str]] = None,
+    pre_init_hooks: Optional[List[str]] = None,
+    post_init_hooks: Optional[List[str]] = None,
 ):
     """Create a Krayt inspector job with the given mounts"""
     timestamp = int(time.time())
     job_name = f"{pod_name}-krayt-{timestamp}"
 
-    # Get environment variables and secrets from the target pod
-    env_vars, secret_volumes = get_pod_env_and_secrets(api, namespace, pod_name)
+    # Get environment variables and secret volumes from the target pod
+    env_vars, secret_volumes = get_env_vars_and_secret_volumes(api, namespace)
 
     # Add secret volumes to our volumes list
     volumes.extend(secret_volumes)
@@ -286,6 +296,23 @@ def create_inspector_job(
         if hasattr(v, "persistent_volume_claim") and v.persistent_volume_claim:
             pvc_info.append(f"{v.name}:{v.persistent_volume_claim.claim_name}")
 
+    template_name = "base.sh"
+    template = env.get_template(template_name)
+    pvcs = None
+    pre_init_scripts = None
+    post_init_scripts = None
+    pre_init_hooks = None
+    post_init_hooks = None
+    command = template.render(
+        volumes=volumes,
+        pvcs=pvcs,
+        additional_packages=additional_packages,
+        pre_init_scripts=pre_init_scripts,
+        post_init_scripts=post_init_scripts,
+        pre_init_hooks=pre_init_hooks,
+        post_init_hooks=post_init_hooks,
+    )
+
     inspector_job = {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -293,187 +320,26 @@ def create_inspector_job(
             "name": job_name,
             "namespace": namespace,
             "labels": {"app": "krayt"},
+            "annotations": {"pvcs": ",".join(pvc_info) if pvc_info else "none"},
         },
         "spec": {
-            "ttlSecondsAfterFinished": 0,  # Delete immediately after completion
+            "ttlSecondsAfterFinished": 600,
             "template": {
                 "metadata": {"labels": {"app": "krayt"}},
                 "spec": {
                     "containers": [
                         {
-                            "name": "krayt",
-                            "image": "alpine:latest",  # Use Alpine as base for package management
-                            "command": [
-                                "sh",
-                                "-c",
-                                """
-# Install basic tools first
-apk update
-apk add curl
-
-# Install lf (terminal file manager)
-curl -L https://github.com/gokcehan/lf/releases/download/r31/lf-linux-amd64.tar.gz | tar xzf - -C /usr/local/bin
-
-# Install the rest of the tools
-apk add ripgrep exa ncdu dust \
-    file hexyl jq yq bat fd fzf \
-    htop bottom difftastic \
-    mtr bind-tools \
-    aws-cli sqlite sqlite-dev sqlite-libs
-
-# Function to update MOTD
-update_motd() {
-    cat << EOF > /etc/motd
-====================================
-Krayt Dragon's Lair
-====================================
-"Inside every volume lies a pearl of wisdom waiting to be discovered."
-
-Mounted Volumes:
-$(echo "$MOUNTS" | tr ',' '\\n' | sed 's/^/- /')
-
-Persistent Volume Claims:
-$(echo "$PVCS" | tr ',' '\\n' | sed 's/^/- /')
-
-Mounted Secrets:
-$(for d in /mnt/secrets/*; do if [ -d "$d" ]; then echo "- $(basename $d)"; fi; done)
-
-Environment Variables:
-$(env | sort | sed 's/^/- /')
-
-Your Hunting Tools:
-File Navigation:
-- lf: Terminal file manager (run 'lf')
-- exa: Modern ls (run 'ls', 'll', or 'tree')
-- fd: Modern find (run 'fd pattern')
-
-Search & Analysis:
-- rg (ripgrep): Fast search (run 'rg pattern')
-- bat: Better cat with syntax highlighting
-- hexyl: Hex viewer (run 'hexyl file')
-- file: File type detection
-
-Disk Usage:
-- ncdu: Interactive disk usage analyzer
-- dust: Disk usage analyzer
-- du: Standard disk usage tool
-
-File Comparison:
-- difft: Modern diff tool (alias 'diff')
-
-System Monitoring:
-- btm: Modern system monitor (alias 'top')
-- htop: Interactive process viewer
-
-JSON/YAML Tools:
-- jq: JSON processor
-- yq: YAML processor
-
-Network Tools:
-- dig: DNS lookup
-- mtr: Network diagnostics
-
-Cloud & Database:
-- aws: AWS CLI
-- sqlite3: SQLite database tool
-
-Type 'tools-help' for detailed usage information
-====================================
-EOF
-}
-
-# Create helpful aliases and functions
-cat << 'EOF' > /root/.ashrc
-if [ "$PS1" ]; then
-    cat /etc/motd
-fi
-
-# Aliases for better file navigation
-alias ls='exa'
-alias ll='exa -l'
-alias la='exa -la'
-alias tree='exa --tree'
-alias find='fd'
-alias top='btm'
-alias diff='difft'
-alias cat='bat --paging=never'
-
-# Function to show detailed tool help
-tools-help() {
-    echo "Krayt Dragon Hunter's Guide:"
-    echo
-    echo "File Navigation:"
-    echo "  lf                   : Navigate with arrow keys, q to quit, h for help"
-    echo "  ls, ll, la          : List files (exa with different options)"
-    echo "  tree                : Show directory structure"
-    echo "  fd pattern          : Find files matching pattern"
-    echo
-    echo "Search & Analysis:"
-    echo "  rg pattern          : Search file contents"
-    echo "  bat file            : View file with syntax highlighting"
-    echo "  hexyl file          : View file in hex format"
-    echo "  file path           : Determine file type"
-    echo
-    echo "Disk Usage:"
-    echo "  ncdu                : Interactive disk usage analyzer (navigate with arrows)"
-    echo "  dust path           : Tree-based disk usage"
-    echo "  du -sh *            : Summarize disk usage"
-    echo
-    echo "File Comparison:"
-    echo "  diff file1 file2    : Compare files with syntax highlighting"
-    echo
-    echo "System Monitoring:"
-    echo "  top (btm)           : Modern system monitor"
-    echo "  htop                : Process viewer"
-    echo
-    echo "JSON/YAML Tools:"
-    echo "  jq . file.json      : Format and query JSON"
-    echo "  yq . file.yaml      : Format and query YAML"
-    echo
-    echo "Network Tools:"
-    echo "  dig domain          : DNS lookup"
-    echo "  mtr host            : Network diagnostics"
-    echo
-    echo "Cloud & Database:"
-    echo "  aws                 : AWS CLI tool"
-    echo "  sqlite3             : SQLite database tool"
-    echo
-    echo "Secrets:"
-    echo "  ls /mnt/secrets     : List mounted secrets"
-}
-
-# Set some helpful environment variables
-export EDITOR=vi
-export PAGER=less
-EOF
-
-# Set up environment to always source our RC file
-echo "export ENV=/root/.ashrc" > /etc/profile
-echo "export ENV=/root/.ashrc" > /etc/environment
-
-# Make RC file available to all shells
-cp /root/.ashrc /etc/profile.d/motd.sh
-ln -sf /root/.ashrc /root/.profile
-ln -sf /root/.ashrc /root/.bashrc
-ln -sf /root/.ashrc /root/.mkshrc
-ln -sf /root/.ashrc /etc/shinit
-
-# Create initial MOTD
-update_motd
-
-sleep 3600
-                                """,
-                            ],
-                            "env": env_vars
-                            + [
-                                {"name": "MOUNTS", "value": ",".join(mount_info)},
-                                {"name": "PVCS", "value": ",".join(pvc_info)},
-                                {"name": "ENV", "value": "/root/.ashrc"},
-                            ],
+                            "name": "inspector",
+                            "image": image,
+                            "command": ["sh", "-c", command],
+                            "env": env_vars,
                             "volumeMounts": formatted_mounts,
                         }
                     ],
                     "volumes": [format_volume(v) for v in volumes if format_volume(v)],
+                    "imagePullSecrets": [{"name": imagepullsecret}]
+                    if imagepullsecret
+                    else None,
                     "restartPolicy": "Never",
                 },
             },
@@ -499,37 +365,32 @@ PROTECTED_NAMESPACES = {
 }
 
 
+def setup_environment():
+    """Set up the environment with proxy settings and other configurations"""
+    # Load environment variables for proxies
+    proxy_vars = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    ]
+
+    for var in proxy_vars:
+        if var in os.environ:
+            # Make both upper and lower case versions available
+            os.environ[var.upper()] = os.environ[var]
+            os.environ[var.lower()] = os.environ[var]
+
+
 def version_callback(value: bool):
     if value:
-        typer.echo(f"Version: {KRAYT_VERSION}")
+        typer.echo(f"Version: {__version__}")
         raise typer.Exit()
 
 
-@app.callback(invoke_without_command=True)
-def main(
-    ctx: typer.Context,
-    version: bool = typer.Option(
-        False, "--version", "-v", help="Show version", callback=version_callback
-    ),
-):
-    """
-    Krack open a Krayt dragon!
-    """
-    if ctx.invoked_subcommand is None:
-        ctx.get_help()
-
-
-@app.command()
-def exec(
-    namespace: Optional[str] = typer.Option(
-        None,
-        help="Kubernetes namespace. If not specified, will search for inspectors across all namespaces.",
-    ),
-):
-    """
-    Enter the Krayt dragon's lair! Connect to a running inspector pod.
-    If multiple inspectors are found, you'll get to choose which one to explore.
-    """
+def get_pod(namespace: Optional[str] = None):
     config.load_kube_config()
     batch_api = client.BatchV1Api()
 
@@ -569,17 +430,75 @@ def exec(
                 typer.echo("No inspector selected.")
                 raise typer.Exit(1)
 
-        # Execute the shell
-        typer.echo(f"Connecting to inspector {pod_namespace}/{pod_name}...")
-        os.execvp(
-            "kubectl",
-            ["kubectl", "exec", "-it", "-n", pod_namespace, pod_name, "--", "sh", "-l"],
-        )
-
     except client.exceptions.ApiException as e:
         logging.error(f"Failed to list jobs: {e}")
         typer.echo(f"Failed to list jobs: {e}", err=True)
         raise typer.Exit(1)
+
+    return pod_name, pod_namespace
+
+
+@app.command()
+def exec(
+    namespace: Optional[str] = typer.Option(
+        None,
+        help="Kubernetes namespace. If not specified, will search for inspectors across all namespaces.",
+    ),
+):
+    """
+    Enter the Krayt dragon's lair! Connect to a running inspector pod.
+    If multiple inspectors are found, you'll get to choose which one to explore.
+    """
+
+    pod_name, pod_namespace = get_pod(namespace)
+    exec_command = [
+        "kubectl",
+        "exec",
+        "-it",
+        "-n",
+        pod_namespace,
+        pod_name,
+        "--",
+        "/bin/bash",
+        "-l",
+    ]
+
+    os.execvp("kubectl", exec_command)
+
+
+@app.command()
+def port_forward(
+    namespace: Optional[str] = typer.Option(
+        None,
+        help="Kubernetes namespace. If not specified, will search for inspectors across all namespaces.",
+    ),
+    port: str = typer.Option(
+        "8080:8080",
+        "--port",
+        "-p",
+        help="Port to forward to the inspector pod",
+    ),
+):
+    """
+    Enter the Krayt dragon's lair! Connect to a running inspector pod.
+    If multiple inspectors are found, you'll get to choose which one to explore.
+    """
+    if ":" not in port:
+        # if port does not contain a ":" it should be an int
+        port = int(port)
+        port = f"{port}:{port}"
+
+    pod_name, pod_namespace = get_pod(namespace)
+    port_forward_command = [
+        "kubectl",
+        "port-forward",
+        "-n",
+        pod_namespace,
+        pod_name,
+        port,
+    ]
+
+    os.execvp("kubectl", port_forward_command)
 
 
 @app.command()
@@ -667,13 +586,139 @@ def clean(
 def create(
     namespace: Optional[str] = typer.Option(
         None,
+        "--namespace",
+        "-n",
         help="Kubernetes namespace. If not specified, will search for pods across all namespaces.",
+    ),
+    clone: Optional[str] = typer.Option(
+        None,
+        "--clone",
+        "-c",
+        help="Clone an existing pod",
+    ),
+    image: str = typer.Option(
+        "alpine:latest",
+        "--image",
+        "-i",
+        help="Container image to use for the inspector pod",
+    ),
+    imagepullsecret: Optional[str] = typer.Option(
+        None,
+        "--imagepullsecret",
+        help="Name of the image pull secret to use for pulling private images",
+    ),
+    additional_packages: Optional[List[str]] = typer.Option(
+        None,
+        "--additional-packages",
+        "-ap",
+        help="additional packages to install in the inspector pod",
+    ),
+    additional_package_bundles: Optional[List[str]] = typer.Option(
+        None,
+        "--additional-package-bundles",
+        "-ab",
+        help="additional packages to install in the inspector pod",
+    ),
+    pre_init_scripts: Optional[List[str]] = typer.Option(
+        None,
+        "--pre-init-scripts",
+        help="additional scripts to execute at the end of container initialization",
+    ),
+    post_init_scripts: Optional[List[str]] = typer.Option(
+        None,
+        "--post-init-scripts",
+        "--init-scripts",
+        help="additional scripts to execute at the start of container initialization",
+    ),
+    pre_init_hooks: Optional[List[str]] = typer.Option(
+        None,
+        "--pre-init-hooks",
+        help="additional hooks to execute at the end of container initialization",
+    ),
+    post_init_hooks: Optional[List[str]] = typer.Option(
+        None,
+        "--post-init-hooks",
+        help="additional hooks to execute at the start of container initialization",
     ),
 ):
     """
     Krack open a Krayt dragon! Create an inspector pod to explore what's inside your volumes.
     If namespace is not specified, will search for pods across all namespaces.
     The inspector will be created in the same namespace as the selected pod.
+    """
+    # For create, we want to list all pods, not just Krayt pods
+    selected_namespace = None
+    selected_pod = None
+
+    if namespace is None and clone is not None and "/" in clone:
+        selected_namespace, selected_pod = clone.split("/", 1)
+    elif namespace is not None and clone is not None:
+        selected_namespace = namespace
+        selected_pod = clone
+
+    pods = get_pods(namespace, label_selector=None)
+    if not pods:
+        typer.echo("No pods found.")
+        raise typer.Exit(1)
+
+    if selected_pod not in (p[0] for p in pods) or selected_pod is None:
+        if selected_pod is not None:
+            pods = [p for p in pods if selected_pod in p[0]]
+        if len(pods) == 1:
+            selected_pod, selected_namespace = pods[0]
+        else:
+            selected_pod, selected_namespace = fuzzy_select(pods)
+        if not selected_pod:
+            typer.echo("No pod selected.")
+            raise typer.Exit(1)
+
+    # typer.echo(f"Selected pod exists: {selected_pod in (p[0] for p in pods)}")
+    # typer.echo(f"Selected pod: {selected_pod} ({selected_namespace})")
+
+    pod_spec = get_pod_spec(selected_pod, selected_namespace)
+    volume_mounts, volumes = get_pod_volumes_and_mounts(pod_spec)
+
+    inspector_job = create_inspector_job(
+        client.CoreV1Api(),
+        selected_namespace,
+        selected_pod,
+        volume_mounts,
+        volumes,
+        image=image,
+        imagepullsecret=imagepullsecret,
+        additional_packages=additional_packages,
+        pre_init_scripts=pre_init_scripts,
+        post_init_scripts=post_init_scripts,
+        pre_init_hooks=pre_init_hooks,
+        post_init_hooks=post_init_hooks,
+    )
+
+    # Output the job manifest
+    typer.echo(yaml.dump(clean_dict(inspector_job), sort_keys=False))
+
+
+@app.command()
+def version():
+    """Show the version of Krayt."""
+    typer.echo(f"Version: {__version__}")
+
+
+@app.command()
+def logs(
+    namespace: Optional[str] = typer.Option(
+        None,
+        help="Kubernetes namespace. If not specified, will search for inspectors across all namespaces.",
+    ),
+    follow: bool = typer.Option(
+        False,
+        "--follow",
+        "-f",
+        help="Follow the logs in real-time",
+    ),
+):
+    """
+    View logs from a Krayt inspector pod.
+    If multiple inspectors are found, you'll get to choose which one to explore.
     """
     pods = get_pods(namespace)
     if not pods:
@@ -685,22 +730,42 @@ def create(
         typer.echo("No pod selected.")
         raise typer.Exit(1)
 
-    pod_spec = get_pod_spec(selected_pod, selected_namespace)
-    volume_mounts, volumes = get_pod_volumes_and_mounts(pod_spec)
+    try:
+        config.load_kube_config()
+        api = client.CoreV1Api()
+        logs = api.read_namespaced_pod_log(
+            name=selected_pod,
+            namespace=selected_namespace,
+            follow=follow,
+            _preload_content=False,
+        )
 
-    inspector_job = create_inspector_job(
-        client.CoreV1Api(), selected_namespace, selected_pod, volume_mounts, volumes
-    )
+        if follow:
+            for line in logs:
+                typer.echo(line.decode("utf-8").strip())
+        else:
+            typer.echo(logs.read().decode("utf-8"))
 
-    # Output the job manifest
-    typer.echo(yaml.dump(clean_dict(inspector_job), sort_keys=False))
+    except client.rest.ApiException as e:
+        typer.echo(f"Error reading logs: {e}")
+        raise typer.Exit(1)
 
 
-@app.command()
-def version():
-    """Show the version of Krayt."""
-    typer.echo(f"Version: {KRAYT_VERSION}")
+@app.command("list")
+def list_pods():
+    pods = get_pods()
+    if not pods:
+        typer.echo("No pods found.")
+        raise typer.Exit(1)
+
+    for pod, namespace in pods:
+        typer.echo(f"{pod} ({namespace})")
+
+
+def main():
+    setup_environment()
+    app()
 
 
 if __name__ == "__main__":
-    app()
+    main()
