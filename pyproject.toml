@@ -7,6 +7,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.sdist]
 exclude = ["/.github"]
 
+[tool.hatch.build.targets.binary]
+
 [project]
 name = "krayt"
 dynamic = ["version"]
@@ -54,3 +56,14 @@ path = "krayt/__about__.py"
 
 [project.scripts]
 krayt = "krayt.cli:app"
+
+[tool.hatch.envs.default]
+dependencies = [
+    "ruff",
+    "pyinstrument",
+]
+
+[tool.hatch.envs.default.scripts]
+lint = "ruff check krayt"
+format = "ruff format krayt"
+lint-format = ['lint', 'format']
