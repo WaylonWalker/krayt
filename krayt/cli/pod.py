@@ -98,7 +98,7 @@ def fuzzy_select(items):
         selected = iterfzf.iterfzf(
             formatted_items,
             prompt="Select a pod to clone:",
-            preview='''kubectl describe pod "$(echo {} | awk -F'[(|)]' '{gsub(/\x1b\[[0-9;]*m/, "", $1); print $1}' | xargs)" -n "$(echo {} | awk -F'[(|)]' '{gsub(/\x1b\[[0-9;]*m/, "", $2); print $2}' | xargs)"''',
+            # preview='''kubectl describe pod "$(echo {} | awk -F'[(|)]' '{gsub(/\x1b\[[0-9;]*m/, "", $1); print $1}' | xargs)" -n "$(echo {} | awk -F'[(|)]' '{gsub(/\x1b\[[0-9;]*m/, "", $2); print $2}' | xargs)"''',
         )
         if not selected:
             return None, None

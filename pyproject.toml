@@ -35,6 +35,7 @@ dependencies = [
      "jinja2",
      "iterfzf",
      "pydantic",
+     "more-itertools",
 ]
 
 [[project.authors]]
