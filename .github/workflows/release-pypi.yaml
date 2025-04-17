@@ -5,6 +5,8 @@ on:
     paths:
       - "krayt/**"
       - "pyproject.toml"
+permissions:
+  contents: write
 env:
   HATCH_INDEX_USER: __token__
   HATCH_INDEX_AUTH: ${{ secrets.pypi_password }}
