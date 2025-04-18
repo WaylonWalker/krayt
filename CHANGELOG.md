@@ -1,3 +1,11 @@
+## 0.3.0
+
+- created pypi release
+- updated releases to use pyapp
+- all new package
+- port forward support
+- additional_packages support
+
 ## 0.2.0
 
 ### Added
