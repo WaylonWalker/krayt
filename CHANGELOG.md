@@ -1,3 +1,7 @@
+## 0.4.0
+
+- create now has --apply to apply the generated manifest to the cluster
+
 ## 0.3.0
 
 - created pypi release

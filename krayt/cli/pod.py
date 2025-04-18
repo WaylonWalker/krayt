@@ -144,6 +144,17 @@ def get_pods(
         raise typer.Exit(1)
 
 
+def get_namespaces(
+    namespace=None,
+    label_selector: str = "app=krayt",
+):
+    config.load_kube_config()
+    api = client.CoreV1Api()
+
+    all_namespaces = [n.metadata.name for n in api.list_namespace().items]
+    return all_namespaces
+
+
 def get_pod_spec(pod_name, namespace):
     config.load_kube_config()
     v1 = client.CoreV1Api()
@@ -640,6 +651,11 @@ def create(
         "--post-init-hooks",
         help="additional hooks to execute at the start of container initialization",
     ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Automatically apply the changes instead of just echoing them.",
+    ),
 ):
     """
     Krack open a Krayt dragon! Create an inspector pod to explore what's inside your volumes.
@@ -647,16 +663,15 @@ def create(
     The inspector will be created in the same namespace as the selected pod.
     """
     # For create, we want to list all pods, not just Krayt pods
-    selected_namespace = None
-    selected_pod = None
+    selected_namespace = namespace
+    selected_pod = clone
 
     if namespace is None and clone is not None and "/" in clone:
         selected_namespace, selected_pod = clone.split("/", 1)
-    elif namespace is not None and clone is not None:
-        selected_namespace = namespace
-        selected_pod = clone
 
-    pods = get_pods(namespace, label_selector=None)
+    namepaces = get_namespaces(namespace)
+    pods = get_pods(namespace, label_selector="app!=krayt")
+
     if not pods:
         typer.echo("No pods found.")
         raise typer.Exit(1)
@@ -694,7 +709,43 @@ def create(
     )
 
     # Output the job manifest
-    typer.echo(yaml.dump(clean_dict(inspector_job), sort_keys=False))
+    job_yaml = yaml.dump(clean_dict(inspector_job), sort_keys=False)
+
+    if apply:
+        # # Apply the job to the cluster
+        # import tempfile
+        # import subprocess
+        #
+        # with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml") as temp_file:
+        #     temp_file.write(job_yaml)
+        #     temp_file.flush()
+        #
+        #     try:
+        #         typer.echo(
+        #             f"Applying job {job_name} to namespace {selected_namespace}..."
+        #         )
+        #         result = subprocess.run(
+        #             ["kubectl", "apply", "-f", temp_file.name],
+        #             capture_output=True,
+        #             text=True,
+        #             check=True,
+        #         )
+        #         typer.echo(result.stdout)
+        #         typer.echo(f"Successfully created inspector job {job_name}")
+        #     except subprocess.CalledProcessError as e:
+        #         typer.echo(f"Error applying job: {e.stderr}", err=True)
+        #         raise typer.Exit(1)
+        #
+        batch_api = client.BatchV1Api()
+        job = batch_api.create_namespaced_job(
+            namespace=selected_namespace,
+            body=inspector_job,
+        )
+        print(f"Job {job.metadata.name} created.")
+        return job
+    else:
+        # Just echo the YAML
+        typer.echo(job_yaml)
 
 
 @app.command()
