@@ -21,7 +21,11 @@ def get_release_notes(version):
 
 You can install krayt using one of these methods:
 
-> !krayt requires [uv](https://docs.astral.sh/uv/getting-started/installation/) to be installed
+## pypi
+
+``` bash
+pip install krayt
+```
 
 ### Using i.jpillora.com (recommended)
 
@@ -37,8 +41,8 @@ curl -fsSL https://github.com/waylonwalker/krayt/releases/download/v{version}/in
 
 ### Manual download
 You can also manually download the archive for your platform from the releases page:
-- [x86_64-unknown-linux-gnu](https://github.com/waylonwalker/krayt/releases/download/v{version}/krayt-{version}-x86_64-unknown-linux-gnu.tar.gz)
-- [aarch64-unknown-linux-gnu](https://github.com/waylonwalker/krayt/releases/download/v{version}/krayt-{version}-aarch64-unknown-linux-gnu.tar.gz)"""
+- [x86_64-unknown-linux-gnu](https://github.com/waylonwalker/krayt/releases/download/v{version}/krayt-{version}-x86_64-unknown-linux-gnu)
+- [aarch64-unknown-linux-gnu](https://github.com/waylonwalker/krayt/releases/download/v{version}/krayt-{version}-aarch64-unknown-linux-gnu)"""
 
             # Get help output for main command and all subcommands
             try:
@@ -46,17 +50,23 @@ You can also manually download the archive for your platform from the releases p
 
                 # Get main help output
                 main_help = subprocess.check_output(
-                    ["./krayt.py", "--help"],
+                    ["krayt", "--help"],
                     stderr=subprocess.STDOUT,
                     universal_newlines=True,
                 )
                 help_outputs.append(("Main Command", main_help))
 
                 # Get help for each subcommand
-                subcommands = ["create", "exec", "clean", "version"]
+                subcommands = [
+                    "create",
+                    "exec",
+                    "clean",
+                    "version",
+                    "pod",
+                ]
                 for cmd in subcommands:
                     cmd_help = subprocess.check_output(
-                        ["./krayt.py", cmd, "--help"],
+                        ["krayt", cmd, "--help"],
                         stderr=subprocess.STDOUT,
                         universal_newlines=True,
                     )
