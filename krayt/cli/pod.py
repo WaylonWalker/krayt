@@ -13,6 +13,8 @@ import sys
 import tty
 import termios
 import select
+import signal
+import json
 
 
 logging.basicConfig(level=logging.WARNING)
@@ -443,87 +445,121 @@ def get_pod(namespace: Optional[str] = None):
     return pod_name, pod_namespace
 
 
-# @app.command()
-# def exec(
-#     namespace: Optional[str] = typer.Option(
-#         None,
-#         help="Kubernetes namespace. If not specified, will search for inspectors across all namespaces.",
-#     ),
-# ):
-#     """
-#     Enter the Krayt dragon's lair! Connect to a running inspector pod.
-#     If multiple inspectors are found, you'll get to choose which one to explore.
-#     """
-#
-#     pod_name, pod_namespace = get_pod(namespace)
-#     exec_command = [
-#         "kubectl",
-#         "exec",
-#         "-it",
-#         "-n",
-#         pod_namespace,
-#         pod_name,
-#         "--",
-#         "/bin/bash",
-#         "-l",
-#     ]
-#
-#     os.execvp("kubectl", exec_command)
-
-
 def interactive_exec(pod_name: str, namespace: str):
     # Load kubeconfig from local context (or use load_incluster_config if running inside the cluster)
-    config.load_kube_config()
+    print(f"Connecting to pod {pod_name} in namespace {namespace}...")
+    try:
+        config.load_kube_config()
+    except Exception as e:
+        print(f"Error loading kubeconfig: {e}", file=sys.stderr)
+        return
 
     core_v1 = client.CoreV1Api()
-    command = ["/bin/bash", "-i"]
+    command = ["/bin/bash", "-l"]
+    resp = None
 
     # Save the current terminal settings
     oldtty = termios.tcgetattr(sys.stdin)
+
+    # Function to handle window resize events
+    def handle_resize(signum, frame):
+        if resp and resp.is_open():
+            # Get the current terminal size
+            cols, rows = os.get_terminal_size()
+            # Send terminal resize command via websocket
+            # Format matches kubectl's resize message format
+            resize_msg = json.dumps({"Width": cols, "Height": rows})
+            resp.write_channel(4, resize_msg)
+
+    # Function to handle exit signals
+    def handle_exit(signum, frame):
+        if resp and resp.is_open():
+            # Send Ctrl+C to the remote process
+            resp.write_stdin("\x03")
+
     try:
         # Put terminal into raw mode but don't handle local echo ourselves
         # Let the remote terminal handle echoing and control characters
         tty.setraw(sys.stdin.fileno())
-        
+
+        # Set up signal handlers
+        signal.signal(signal.SIGWINCH, handle_resize)  # Window resize
+        signal.signal(signal.SIGINT, handle_exit)  # Ctrl+C
+
         # Create a TTY-enabled exec connection to the pod
-        resp = stream(
-            core_v1.connect_get_namespaced_pod_exec,
-            pod_name,
-            namespace,
-            command=command,
-            stderr=True,
-            stdin=True,
-            stdout=True,
-            tty=True,
-            _preload_content=False,
-        )
+        try:
+            resp = stream(
+                core_v1.connect_get_namespaced_pod_exec,
+                pod_name,
+                namespace,
+                command=command,
+                stderr=True,
+                stdin=True,
+                stdout=True,
+                tty=True,
+                _preload_content=False,
+            )
+            print(f"Connected to {pod_name}")
+        except Exception as e:
+            print(f"\nError connecting to pod: {e}", file=sys.stderr)
+            return
+
+        # Wait for the connection to be ready
+        time.sleep(0.2)
+
+        # Send initial terminal size
+        cols, rows = os.get_terminal_size()
+        resize_msg = json.dumps({"Width": cols, "Height": rows})
+        resp.write_channel(4, resize_msg)
+
+        # Make sure the size is set by sending a resize event
+        handle_resize(None, None)
 
         # Set up a simple select-based event loop to handle I/O
-        while resp.is_open():
-            # Update the websocket connection
-            resp.update(timeout=0.1)
-            
-            # Handle output from the pod
-            if resp.peek_stdout():
-                sys.stdout.write(resp.read_stdout())
-                sys.stdout.flush()
-            if resp.peek_stderr():
-                sys.stderr.write(resp.read_stderr())
-                sys.stderr.flush()
+        try:
+            while resp and resp.is_open():
+                # Update the websocket connection
+                resp.update(timeout=0.1)
 
-            # Check for input from the user
-            rlist, _, _ = select.select([sys.stdin], [], [], 0.01)
-            if sys.stdin in rlist:
-                # Read input and forward it to the pod without local echo
-                data = os.read(sys.stdin.fileno(), 1024)
-                if data:
+                # Handle output from the pod
+                if resp.peek_stdout():
+                    sys.stdout.write(resp.read_stdout())
+                    sys.stdout.flush()
+                if resp.peek_stderr():
+                    sys.stderr.write(resp.read_stderr())
+                    sys.stderr.flush()
+
+                # Check for input from the user
+                rlist, _, _ = select.select([sys.stdin], [], [], 0.01)
+                if sys.stdin in rlist:
+                    # Read input and forward it to the pod without local echo
+                    data = os.read(sys.stdin.fileno(), 1024)
+                    if not data:  # EOF (e.g., user pressed Ctrl+D)
+                        break
                     resp.write_stdin(data.decode())
+        except Exception as e:
+            print(f"\nConnection error: {e}", file=sys.stderr)
 
+    except KeyboardInterrupt:
+        # Handle Ctrl+C gracefully
+        print("\nSession terminated by user", file=sys.stderr)
     except Exception as e:
         print(f"\nError in interactive session: {e}", file=sys.stderr)
     finally:
+        # Reset signal handlers
+        signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+        # Close the connection if it's still open
+        if resp and resp.is_open():
+            try:
+                resp.close()
+            except:
+                pass
+
         # Always restore terminal settings
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, oldtty)
+        print("\nConnection closed", file=sys.stderr)
 
 
 @app.command()
@@ -531,6 +567,12 @@ def exec(
     namespace: Optional[str] = typer.Option(
         None,
         help="Kubernetes namespace. If not specified, will search for inspectors across all namespaces.",
+    ),
+    shell: Optional[str] = typer.Option(
+        "/bin/bash",
+        "--shell",
+        "-s",
+        help="Shell to use for the inspector pod",
     ),
 ):
     """
@@ -541,24 +583,26 @@ def exec(
     core_v1 = client.CoreV1Api()
 
     pod_name, pod_namespace = get_pod(namespace)
-    interactive_exec(pod_name, pod_namespace)
 
-    # command = ["/bin/bash", "-l"]
-    # print(f"kubectl exec -it -n {pod_namespace} {pod_name} -- {' '.join(command)}")
-    # print(
-    #     f"execing into {pod_name} in {pod_namespace} with command {' '.join(command)}"
-    # )
-    # resp = stream(
-    #     core_v1.connect_get_namespaced_pod_exec,
-    #     pod_name,
-    #     pod_namespace,
-    #     command=command,
-    #     stderr=True,
-    #     stdin=True,
-    #     stdout=True,
-    #     tty=True,
-    # )
-    # print(resp)
+    try:
+        pod_name, pod_namespace = get_pod(namespace)
+        exec_command = [
+            "kubectl",
+            "exec",
+            "-it",
+            "-n",
+            pod_namespace,
+            pod_name,
+            "--",
+            shell,
+            "-l",
+        ]
+
+        os.execvp("kubectl", exec_command)
+    except Exception as e:
+        print(f"Error executing command with kubectl trying python api: {e}")
+
+        interactive_exec(pod_name, pod_namespace)
 
 
 @app.command()
