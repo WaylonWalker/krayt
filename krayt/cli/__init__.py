@@ -6,7 +6,7 @@ from typer import Typer
 
 app = Typer()
 
-app.add_typer(templates_app, name="templates", no_args_is_help=True)
+app.add_typer(templates_app, name="template", no_args_is_help=True)
 app.add_typer(pod_app, name="pod", no_args_is_help=True)
 app.command(name="create")(create)
 app.command(name="c")(create)

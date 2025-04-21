@@ -13,7 +13,8 @@ def list():
 
 
 @app.command()
-def base(
+def render(
+    template_name: Optional[str] = typer.Option("base.sh", "--template-name", "-t"),
     volumes: Optional[List[str]] = typer.Option(
         None,
         "--volume",
@@ -48,7 +49,6 @@ def base(
         help="additional hooks to execute at the start of container initialization",
     ),
 ):
-    template_name = "base.sh"
     template = env.get_template(template_name)
     rendered = template.render(
         volumes=volumes,
@@ -62,37 +62,37 @@ def base(
     print(rendered)
 
 
-@app.command()
-def install(
-    additional_packages: Optional[List[str]] = typer.Option(
-        ..., "--additional-packages", "-ap"
-    ),
-):
-    template_name = "install.sh"
-    template = env.get_template(template_name)
-    rendered = template.render(additional_packages=additional_packages)
-    print(rendered)
-
-
-@app.command()
-def motd(
-    volumes: Optional[List[str]] = typer.Option(
-        None,
-        "--volume",
-    ),
-    pvcs: Optional[List[str]] = typer.Option(
-        None,
-        "--pvc",
-    ),
-    additional_packages: Optional[List[str]] = typer.Option(
-        ..., "--additional-packages", "-ap"
-    ),
-):
-    template_name = "motd.sh"
-    template = env.get_template(template_name)
-    rendered = template.render(
-        volumes=volumes,
-        pvcs=pvcs,
-        additional_packages=additional_packages,
-    )
-    print(rendered)
+# @app.command()
+# def install(
+#     additional_packages: Optional[List[str]] = typer.Option(
+#         ..., "--additional-packages", "-ap"
+#     ),
+# ):
+#     template_name = "install.sh"
+#     template = env.get_template(template_name)
+#     rendered = template.render(additional_packages=additional_packages)
+#     print(rendered)
+#
+#
+# @app.command()
+# def motd(
+#     volumes: Optional[List[str]] = typer.Option(
+#         None,
+#         "--volume",
+#     ),
+#     pvcs: Optional[List[str]] = typer.Option(
+#         None,
+#         "--pvc",
+#     ),
+#     additional_packages: Optional[List[str]] = typer.Option(
+#         ..., "--additional-packages", "-ap"
+#     ),
+# ):
+#     template_name = "motd.sh"
+#     template = env.get_template(template_name)
+#     rendered = template.render(
+#         volumes=volumes,
+#         pvcs=pvcs,
+#         additional_packages=additional_packages,
+#     )
+#     print(rendered)
