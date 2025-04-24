@@ -2,6 +2,7 @@
 
 - create now has --apply to apply the generated manifest to the cluster
 - generic templates endpoint for cli
+- better motd for volume mounts
 
 ## 0.3.0
 

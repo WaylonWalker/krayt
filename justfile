@@ -44,8 +44,8 @@ create-archives:
     # ./scripts/generate_install_script.py "$VERSION"
     # chmod +x dist/install.sh
 
-# create-release: create-archives
-create-release:
+create-release: create-tag create-archives
+# create-release:
     #!/usr/bin/env bash
     VERSION=$(hatch version)
     ./scripts/get_release_notes.py "$VERSION" > release_notes.tmp

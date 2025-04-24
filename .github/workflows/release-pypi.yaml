@@ -22,3 +22,14 @@ jobs:
         env:
           # required for gh release
           GH_TOKEN: ${{ github.token }}
+      - name: Install just
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to DEST
+        shell: bash
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/0.6.16/install.sh | sh
+        shell: bash
+      - name: GitHub Release (just release)
+        run: just create-release
+        shell: bash
