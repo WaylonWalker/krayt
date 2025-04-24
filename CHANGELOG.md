@@ -1,3 +1,7 @@
+## 0.4.1
+
+- Automated release for both pypi and github
+
 ## 0.4.0
 
 - create now has --apply to apply the generated manifest to the cluster
