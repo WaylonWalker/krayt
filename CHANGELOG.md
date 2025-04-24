@@ -1,3 +1,7 @@
+## 0.4.3
+
+- working out binary release process
+
 ## 0.4.2
 
 - working out binary release process
