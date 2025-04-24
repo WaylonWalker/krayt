@@ -5,11 +5,11 @@ cat <<EOF >/etc/motd
 └───────────────────────────────────┘
 
 "Inside every volume lies a pearl of wisdom waiting to be discovered."
-{%- if volumes %}
+{%- if mounts %}
 
 Mounted Volumes:
-{%- for volume in volumes %}
-- {{ volume }}
+{%- for mount in mounts %}
+- {{ mount.name }}:{{ mount.mount_path }}
 {%- endfor %}
 {%- endif %}
 
