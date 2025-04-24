@@ -31,6 +31,17 @@ jobs:
         run: |
           curl -LsSf https://astral.sh/uv/0.6.16/install.sh | sh
         shell: bash
+      - name: Install hatch
+        run: |
+          uv pip install hatch --system
+        shell: bash
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        shell: bash
       - name: GitHub Release (just release)
         run: just create-release
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
