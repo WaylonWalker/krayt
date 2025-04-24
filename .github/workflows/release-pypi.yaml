@@ -16,15 +16,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: waylonwalker/hatch-action@v4
-        with:
-          before-command: "lint-format"
-        env:
-          # required for gh release
-          GH_TOKEN: ${{ github.token }}
+      # - uses: waylonwalker/hatch-action@v4
+      #   with:
+      #     before-command: "lint-format"
+      #   env:
+      #     # required for gh release
+      #     GH_TOKEN: ${{ github.token }}
       - name: Install just
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to DEST
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
         shell: bash
       - name: Install uv
         run: |
