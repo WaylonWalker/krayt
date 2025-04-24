@@ -554,7 +554,7 @@ def interactive_exec(pod_name: str, namespace: str):
         if resp and resp.is_open():
             try:
                 resp.close()
-            except:
+            except Exception:
                 pass
 
         # Always restore terminal settings
@@ -580,7 +580,7 @@ def exec(
     If multiple inspectors are found, you'll get to choose which one to explore.
     """
     config.load_kube_config()  # or config.load_incluster_config() if running inside a pod
-    core_v1 = client.CoreV1Api()
+    client.CoreV1Api()
 
     pod_name, pod_namespace = get_pod(namespace)
 
@@ -797,7 +797,7 @@ def create(
     if namespace is None and clone is not None and "/" in clone:
         selected_namespace, selected_pod = clone.split("/", 1)
 
-    namepaces = get_namespaces(namespace)
+    get_namespaces(namespace)
     pods = get_pods(namespace, label_selector="app!=krayt")
 
     if not pods:
@@ -916,10 +916,10 @@ def list_pods():
         typer.echo(f"{pod} ({namespace})")
 
 
-def main():
-    setup_environment()
-    app()
-
-
-if __name__ == "__main__":
-    main()
+# def main():
+#     setup_environment()
+#     app()
+#
+#
+# if __name__ == "__main__":
+#     main()
