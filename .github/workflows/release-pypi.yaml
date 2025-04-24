@@ -33,7 +33,7 @@ jobs:
         shell: bash
       - name: Install hatch
         run: |
-          uv pip install hatch --system
+          uv tool install hatch
         shell: bash
       - name: Configure Git
         run: |
