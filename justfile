@@ -31,7 +31,7 @@ create-archives:
     rm -rf dist build
     hatch build -t binary
 
-    krayt_bin=dist/binary/krayt-${VERSION}
+    krayt_bin=dist/binary/krayt-${VERSION}/krayt_linux_amd64
     
     # Create the binary for each platform
     for platform in "x86_64-unknown-linux-gnu" "aarch64-unknown-linux-gnu"; do
