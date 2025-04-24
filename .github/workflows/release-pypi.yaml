@@ -22,6 +22,7 @@ jobs:
       #   env:
       #     # required for gh release
       #     GH_TOKEN: ${{ github.token }}
+      #
       - name: Install just
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
