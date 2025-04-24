@@ -1,3 +1,7 @@
+## 0.4.2
+
+- working out binary release process
+
 ## 0.4.1
 
 - Automated release for both pypi and github
